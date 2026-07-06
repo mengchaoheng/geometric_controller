@@ -8,11 +8,19 @@ the same reference interface and publish lower-level commands.
 
 ## Launch File Format
 
-`geometric_controller.launch.xml` is a standard ROS 2 launch file. ROS 2 launch
-supports Python, XML, and YAML frontends. Python launch files are common because
-they are programmable; XML launch files are also standard and are a good fit
-here because this package is intended to stay C++-centric and the launch logic
-is simple.
+The package has two user-facing launch files:
+
+- `geometric_controller.launch.py`: starts `trajectory_offboard_node`, RViz, and
+  the C++/Qt tuning panel. Use this when PX4 SITL and Micro XRCE-DDS Agent are
+  already running in separate terminals.
+- `sitl_geometric_controller.launch.py`: starts PX4 SITL, Micro XRCE-DDS Agent,
+  and includes `geometric_controller.launch.py`. Use this for one-command SITL.
+
+ROS 2 supports Python, XML, and YAML launch frontends. This package uses Python
+launch only, because the SITL entry has conditional `headless` behavior,
+external processes, and launch-file inclusion. Controller defaults live in
+`config/controller.yaml`; launch files load YAML and do not duplicate controller
+parameter defaults.
 
 PX4's `px4_ros_com/launch/offboard_control_launch.yaml` is the minimal official
 example: it only launches the offboard node. This package keeps the same idea,
@@ -34,11 +42,11 @@ Project environment to keep matched:
 - OS: Ubuntu 24.04 LTS
 - ROS 2: Jazzy
 - PX4 Autopilot: `v1.17.0`
-- `px4_ros_com`: `/home/parallels/ws_sensor_combined/src/px4_ros_com`
+- `px4_ros_com`: `~/ws_sensor_combined/src/px4_ros_com`
   - remote: `https://github.com/PX4/px4_ros_com.git`
   - branch: `main`
   - revision: `beta-384-g86e9aeb` (`86e9aeb`)
-- `px4_msgs`: `/home/parallels/ws_sensor_combined/src/px4_msgs`
+- `px4_msgs`: `~/ws_sensor_combined/src/px4_msgs`
   - remote: `https://github.com/PX4/px4_msgs.git`
   - branch: `main`
   - revision: `ff7ae28`
@@ -47,49 +55,86 @@ Keep `px4_msgs` and `px4_ros_com` aligned with the PX4 firmware version used in
 SITL. If PX4 is updated, record the new PX4 tag and the matching message
 repository revisions here.
 
+This controller derives PX4 versioned output topic names from
+`px4_msgs::msg::<Message>::MESSAGE_VERSION`, for example
+`/fmu/out/vehicle_local_position_v1`. Keep the ROS 2 `px4_msgs` package matched
+to the PX4-Autopilot checkout used for SITL. If you switch PX4 branches or tags,
+sync the message definitions from that PX4 checkout and rebuild:
+
+```bash
+cd ~/ws_sensor_combined
+cp -a ~/PX4-Autopilot/msg/*.msg src/px4_msgs/msg/
+cp -a ~/PX4-Autopilot/msg/versioned/*.msg src/px4_msgs/msg/
+cp -a ~/PX4-Autopilot/srv/*.srv src/px4_msgs/srv/
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-up-to geometric_controller
+source install/setup.bash
+```
+
+If PX4 and ROS 2 must intentionally use different message versions, use the PX4
+ROS 2 message translation node instead.
+
 ## Build
 
 Build from the workspace root, not from `src`:
 
 ```bash
-cd /home/parallels/ws_sensor_combined
+cd ~/ws_sensor_combined
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-select geometric_controller
+colcon build --packages-up-to geometric_controller
 source install/setup.bash
 ```
 
 If your ROS 2 distro is not Jazzy, replace `jazzy` with the output of
 `echo $ROS_DISTRO`.
 
-There may also be an old `/home/parallels/ws_sensor_combined/src/install`
+There may also be an old `~/ws_sensor_combined/src/install`
 workspace on this machine. Avoid sourcing that one unless you intentionally
-built from `/home/parallels/ws_sensor_combined/src`; otherwise you can easily
+built from `~/ws_sensor_combined/src`; otherwise you can easily
 run an older installed node while editing the newer source.
 
 ## One-Command SITL Launch
 
-After building, this launch opens three `gnome-terminal` windows: PX4 SITL,
-Micro XRCE-DDS Agent, and this controller.
+After building, this launch starts PX4 SITL, Micro XRCE-DDS Agent, the
+controller, RViz, and the tuning panel from one ROS 2 launch process.
+
+Open QGroundControl and wait until it connects to PX4 before starting this
+launch. This follows the PX4 ROS 2 Offboard example; with the default PX4 SITL
+arming checks, PX4 will not arm without a QGroundControl datalink or RC
+connection.
 
 ```bash
-cd /home/parallels/ws_sensor_combined
+cd ~/ws_sensor_combined
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ros2 launch geometric_controller sitl_geometric_controller.launch.py
 ```
 
-Optional example:
+The controller waits until PX4 `VehicleLocalPosition` is valid, then logs
+`Ready to request takeoff` before it requests Offboard mode and Arm.
+
+Headless Gazebo example:
+
+```bash
+ros2 launch geometric_controller sitl_geometric_controller.launch.py headless:=true
+```
+
+If your PX4 checkout is somewhere else, pass it explicitly:
 
 ```bash
 ros2 launch geometric_controller sitl_geometric_controller.launch.py \
-  trajectory_launch_args:="trajName:=fast_circle omega_value:=0.8"
+  px4_dir:=~/dev/PX4-Autopilot
 ```
 
 Defaults:
 
-- PX4 path: `/home/parallels/PX4-Autopilot`
-- workspace path: `/home/parallels/ws_sensor_combined`
+- PX4 path: `~/PX4-Autopilot`
+- PX4 model: `gz_x500`
+- workspace path: `~/ws_sensor_combined`
 - ROS 2 distro: `jazzy`
+- PX4 GCS datalink arming requirement: enabled
+- trajectory setpoint rate: `100.0 Hz`
+- OffboardControlMode heartbeat rate: `5.0 Hz`
 
 ## Start PX4 SITL and DDS Bridge
 
@@ -99,8 +144,14 @@ running.
 Terminal 1, PX4 SITL:
 
 ```bash
-cd /home/parallels/PX4-Autopilot
+cd ~/PX4-Autopilot
 make px4_sitl gz_x500
+```
+
+For headless Gazebo:
+
+```bash
+HEADLESS=1 make px4_sitl gz_x500
 ```
 
 Terminal 2, Micro XRCE-DDS Agent:
@@ -118,10 +169,10 @@ least surprising.
 Terminal 3:
 
 ```bash
-cd /home/parallels/ws_sensor_combined
+cd ~/ws_sensor_combined
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch geometric_controller geometric_controller.launch.xml
+ros2 launch geometric_controller geometric_controller.launch.py
 ```
 
 This starts:
@@ -133,7 +184,7 @@ This starts:
   parameters
 
 By default `offboard.auto_start` is `true`, matching the ROS 1 workflow: after
-the PX4-required warmup setpoints, the node requests Offboard mode and arms the
+the PX4-required heartbeat warmup, the node requests Offboard mode and arms the
 vehicle. It keeps publishing the trajectory start point first; after the vehicle
 reaches that point, trajectory time starts and PX4 tracks the selected path.
 Before releasing trajectory time, `offboard.use_start_transition` guides the
@@ -141,32 +192,40 @@ reference from the current vehicle position to the trajectory start point with a
 quintic polynomial, similar to the ROS 1 transition logic.
 
 The current version still uses PX4's built-in multicopter position controller;
-there is no ROS 2-side force/torque controller in this step. It publishes
-`OffboardControlMode.position=true` and `TrajectorySetpoint` with position,
-velocity feedforward, acceleration feedforward, yaw, and yawspeed. PX4 uses the
-non-`NaN` velocity and acceleration fields as feedforward terms, which makes
-moving references less laggy than pure position setpoints. `TrajectorySetpoint`
-also has `jerk`, but PX4 multicopter position control treats it as logging data,
-not as a control input.
+there is no ROS 2-side force/torque controller in this step. With the default
+`setpoint.level=position`, it publishes `OffboardControlMode.position=true` and
+`TrajectorySetpoint` with position, velocity feedforward, acceleration
+feedforward, yaw, and yawspeed. PX4 uses the non-`NaN` velocity and acceleration
+fields as feedforward terms, which makes moving references less laggy than pure
+position setpoints.
 
-For a preview-only run that publishes setpoints and visualization but does not
-request Offboard/Arm, use:
+The PX4 input streams are split into two timers:
+
+- `offboard.heartbeat_rate_hz`: `OffboardControlMode`, default `5 Hz`,
+  constrained to `3-10 Hz`.
+- `offboard.setpoint_rate_hz`: `TrajectorySetpoint`, default `100 Hz`,
+  constrained to `50-250 Hz` and published after PX4 local position is valid so
+  PX4 has setpoints before the Offboard request.
+
+This follows PX4's ROS 2 split between Offboard proof-of-life and actual
+setpoints. PX4's official example uses a `100 ms` timer for a minimal `10 Hz`
+demo, while the Saxion low-level reference separates a roughly `3 Hz` offboard
+timer from a `100 Hz` controller timer.
+
+For a pure RViz preview that does not write to `/fmu/in/...`, set
+`offboard.enabled: false` in `config/controller.yaml` or pass a custom full
+parameter file with `param_file:=...`.
+
+For manual Offboard/Arm testing, keep `offboard.enabled: true` and set
+`offboard.auto_start: false` in the YAML.
+
+For a circular trajectory, set `trajName: fast_circle` and adjust
+`omega_value` in the YAML.
+
+Run the controller without RViz or the tuning panel:
 
 ```bash
-ros2 launch geometric_controller geometric_controller.launch.xml auto_start:=false
-```
-
-Example: run a circular trajectory:
-
-```bash
-ros2 launch geometric_controller geometric_controller.launch.xml \
-  trajName:=fast_circle omega_value:=0.8
-```
-
-Run without GUI:
-
-```bash
-ros2 launch geometric_controller geometric_controller.launch.xml \
+ros2 launch geometric_controller geometric_controller.launch.py \
   launch_rviz:=false launch_tuning_panel:=false
 ```
 
@@ -174,11 +233,10 @@ If the vehicle still does not move, check that PX4 accepted Offboard and Arm:
 
 ```bash
 ros2 topic list -t | grep vehicle_status
-ros2 topic echo /fmu/out/vehicle_status_v1 --once --qos-reliability best_effort
+ros2 topic echo /fmu/out/<vehicle_status_topic> --once --qos-reliability best_effort
 ```
 
-Expected values are `nav_state: 14` and `arming_state: 2`. If your topic list
-only shows `/fmu/out/vehicle_status`, echo that topic instead.
+Expected values are `nav_state: 14` and `arming_state: 2`.
 
 For the default `figure8_horizontal` parameters, the start setpoint is in PX4
 NED coordinates:
@@ -270,7 +328,7 @@ Check vehicle status:
 
 ```bash
 ros2 topic list -t | grep vehicle_status
-ros2 topic echo /fmu/out/vehicle_status_v1 --once --qos-reliability best_effort
+ros2 topic echo /fmu/out/<vehicle_status_topic> --once --qos-reliability best_effort
 ```
 
 If `/fmu/...` topics do not appear, check that PX4 SITL is running and that

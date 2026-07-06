@@ -1,19 +1,16 @@
-#include "geometric_controller/reference_trajectory.hpp"
-
-#include <px4_msgs/msg/offboard_control_mode.hpp>
-#include <px4_msgs/msg/trajectory_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_local_position.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
-#include <px4_msgs/msg/vehicle_status.hpp>
-
-#include <geometry_msgs/msg/pose_stamped.hpp>
-#include <rcl_interfaces/msg/floating_point_range.hpp>
-#include <rcl_interfaces/msg/integer_range.hpp>
-#include <rcl_interfaces/msg/parameter_descriptor.hpp>
-#include <nav_msgs/msg/path.hpp>
-#include <rcl_interfaces/msg/set_parameters_result.hpp>
-#include <rclcpp/rclcpp.hpp>
+// Copyright 2026 Chaoheng Meng
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include <algorithm>
 #include <array>
@@ -25,10 +22,40 @@
 #include <string>
 #include <vector>
 
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <px4_msgs/msg/offboard_control_mode.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_status.hpp>
+#include <rcl_interfaces/msg/floating_point_range.hpp>
+#include <rcl_interfaces/msg/integer_range.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
+#include <rclcpp/rclcpp.hpp>
+
+#include "geometric_controller/reference_trajectory.hpp"
+
 namespace
 {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr int64_t kMavlinkIdMin = 1;
+constexpr int64_t kMavlinkIdMax = 255;
+constexpr float kMavModeFlagCustomModeEnabled = 1.0F;
+constexpr float kPx4CustomMainModeOffboard = 6.0F;
+constexpr float kVehicleCommandArm = 1.0F;
+constexpr float kVehicleCommandParamUnused = 0.0F;
+constexpr double kSetpointRateHzDefault = 100.0;
+constexpr double kSetpointRateHzMin = 50.0;
+constexpr double kSetpointRateHzMax = 250.0;
+constexpr double kHeartbeatRateHzDefault = 5.0;
+constexpr double kHeartbeatRateHzMin = 3.0;
+constexpr double kHeartbeatRateHzMax = 10.0;
+constexpr double kStatusTopicWarningDelayS = 5.0;
+constexpr double kStatusTopicWarningPeriodS = 10.0;
 
 struct Quaternion
 {
@@ -41,6 +68,16 @@ struct Quaternion
 bool startsWith(const std::string & value, const std::string & prefix)
 {
   return value.rfind(prefix, 0) == 0;
+}
+
+template<typename MessageT>
+std::string px4VersionedTopic(const std::string & base_topic)
+{
+  if constexpr (MessageT::MESSAGE_VERSION == 0U) {
+    return base_topic;
+  } else {
+    return base_topic + "_v" + std::to_string(MessageT::MESSAGE_VERSION);
+  }
 }
 
 float finiteFloatOrNan(double value)
@@ -131,13 +168,14 @@ rcl_interfaces::msg::ParameterDescriptor describeParameter(const std::string & d
 }
 
 rcl_interfaces::msg::ParameterDescriptor describeDouble(
-  const std::string & description, double min, double max, double step)
+  const std::string & description, double min, double max, double /* step */)
 {
-  (void)step;
   auto descriptor = describeParameter(description);
   rcl_interfaces::msg::FloatingPointRange range;
   range.from_value = min;
   range.to_value = max;
+  // A nonzero FloatingPointRange step validates against a discrete grid.
+  // These controller parameters are continuous; UI increments live in the panel.
   range.step = 0.0;
   descriptor.floating_point_range.push_back(range);
   return descriptor;
@@ -169,11 +207,11 @@ std::array<double, 6> computeQuinticCoefficients(
     v0,
     0.5 * a0,
     (20.0 * (pf - p0) - (8.0 * vf + 12.0 * v0) * t - (3.0 * a0 - af) * t2) /
-      (2.0 * t3),
+    (2.0 * t3),
     (30.0 * (p0 - pf) + (14.0 * vf + 16.0 * v0) * t + (3.0 * a0 - 2.0 * af) * t2) /
-      (2.0 * t4),
+    (2.0 * t4),
     (12.0 * (pf - p0) - (6.0 * vf + 6.0 * v0) * t - (a0 - af) * t2) /
-      (2.0 * t5),
+    (2.0 * t5),
   };
 }
 
@@ -190,7 +228,7 @@ public:
     syncSelectorParameters();
     reference_trajectory_.setParameters(trajectory_parameters_);
     configureRosInterfaces();
-    configureTimer();
+    configureTimers();
 
     parameter_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&TrajectoryOffboardNode::onSetParameters, this, std::placeholders::_1));
@@ -198,14 +236,15 @@ public:
     start_time_ = now();
     RCLCPP_INFO(
       get_logger(),
-      "Trajectory offboard ready: trajName=%s omega_value=%.3f setpoint.level=%s",
+      "Trajectory offboard ready: trajName=%s omega_value=%.3f setpoint.level=%s "
+      "setpoint_rate=%.1f Hz heartbeat_rate=%.1f Hz",
       trajectory_parameters_.traj_name.c_str(), trajectory_parameters_.omega_value,
-      setpoint_level_.c_str());
+      setpoint_level_.c_str(), setpoint_rate_hz_, heartbeat_rate_hz_);
     if (!auto_start_) {
       RCLCPP_WARN(
         get_logger(),
-        "auto_start is false: publishing trajectory setpoints only. PX4 will not move unless it is "
-        "armed and in Offboard, or you relaunch with auto_start:=true.");
+        "auto_start is false: streaming OffboardControlMode heartbeat only until PX4 is manually "
+        "switched to Offboard. TrajectorySetpoint publication is gated to Offboard mode.");
     }
     if (takeoff_before_trajectory_) {
       const auto start = reference_trajectory_.sample(0.0);
@@ -221,36 +260,57 @@ private:
   void declareParameters()
   {
     declare_parameter<bool>(
-      "offboard.enabled", true, describeParameter("Publish PX4 offboard heartbeat and setpoints."));
+      "offboard.enabled", true,
+      describeParameter(
+        "Publish PX4 offboard heartbeat and trajectory setpoints after local position is valid."));
     declare_parameter<bool>(
       "offboard.auto_start", true,
-      describeParameter("Automatically request PX4 Offboard mode and Arm after warmup setpoints."));
+      describeParameter("Automatically request PX4 Offboard mode and Arm after heartbeat warmup."));
     declare_parameter<bool>(
       "offboard.arm_on_start", true, describeParameter("Arm the vehicle during automatic start."));
     declare_parameter<int>(
       "offboard.prearm_setpoints", 10,
-      describeInteger("Number of setpoints to publish before requesting Offboard/Arm.", 0, 200, 1));
+      describeInteger(
+        "Number of OffboardControlMode heartbeat cycles before requesting Offboard/Arm.", 0, 200,
+        1));
     declare_parameter<double>(
-      "offboard.publish_rate_hz", 50.0,
-      describeDouble("Offboard heartbeat and setpoint publish rate [Hz].", 2.1, 200.0, 1.0));
+      "offboard.setpoint_rate_hz", kSetpointRateHzDefault,
+      describeDouble(
+        "TrajectorySetpoint publish rate after local position is valid [Hz].",
+        kSetpointRateHzMin, kSetpointRateHzMax, 1.0));
+    declare_parameter<double>(
+      "offboard.heartbeat_rate_hz", kHeartbeatRateHzDefault,
+      describeDouble(
+        "OffboardControlMode heartbeat publish rate [Hz].", kHeartbeatRateHzMin,
+        kHeartbeatRateHzMax, 1.0));
+    declare_parameter<double>(
+      "offboard.publish_rate_hz", 0.0,
+      describeDouble(
+        "Deprecated alias for offboard.setpoint_rate_hz. Use 0 to disable the alias.",
+        0.0, kSetpointRateHzMax, 1.0));
     declare_parameter<double>(
       "offboard.auto_start_retry_period_s", 1.0,
       describeDouble("Retry period for automatic Offboard/Arm commands [s].", 0.2, 10.0, 0.1));
     declare_parameter<bool>(
       "offboard.takeoff_before_trajectory", true,
-      describeParameter("Hold the trajectory start setpoint until the vehicle reaches it."));
+      describeParameter(
+        "Hold current position before Offboard/Arm, then transition to the trajectory start."));
     declare_parameter<bool>(
       "offboard.use_start_transition", true,
-      describeParameter("Use a quintic transition from current vehicle position to the trajectory start point."));
+      describeParameter(
+      "Use a quintic transition from current vehicle position to the trajectory start point."));
     declare_parameter<double>(
       "offboard.start_transition_duration_s", 4.0,
-      describeDouble("Nominal quintic transition duration to the trajectory start point [s].", 0.5, 20.0, 0.1));
+      describeDouble("Nominal quintic transition duration to the trajectory start point [s].", 0.5,
+      20.0, 0.1));
     declare_parameter<double>(
       "offboard.takeoff_position_tolerance", 0.25,
-      describeDouble("Position tolerance for releasing the trajectory from its start point [m].", 0.02, 2.0, 0.01));
+      describeDouble("Position tolerance for releasing the trajectory from its start point [m].",
+      0.02, 2.0, 0.01));
     declare_parameter<double>(
       "offboard.takeoff_velocity_tolerance", 0.5,
-      describeDouble("Velocity tolerance for releasing the trajectory from its start point [m/s].", 0.02, 3.0, 0.01));
+      describeDouble("Velocity tolerance for releasing the trajectory from its start point [m/s].",
+      0.02, 3.0, 0.01));
 
     declare_parameter<std::string>(
       "setpoint.level", "position",
@@ -260,21 +320,21 @@ private:
       describeParameter("Include velocity feedforward when setpoint.level is position."));
     declare_parameter<bool>(
       "setpoint.acceleration_feedforward", true,
-      describeParameter("Include acceleration feedforward when setpoint.level is position or velocity."));
-    declare_parameter<bool>(
-      "setpoint.jerk_logging", false,
-      describeParameter("Publish jerk in TrajectorySetpoint for PX4 logging. It is not used by mc_pos_control."));
+      describeParameter(
+      "Include acceleration feedforward when setpoint.level is position or velocity."));
     declare_parameter<bool>(
       "setpoint.yaw_rate_feedforward", true,
       describeParameter("Include yaw-rate feedforward in TrajectorySetpoint."));
 
-    declare_parameter<std::string>("px4.offboard_control_mode_topic", "/fmu/in/offboard_control_mode");
+    declare_parameter<std::string>("px4.offboard_control_mode_topic",
+      "/fmu/in/offboard_control_mode");
     declare_parameter<std::string>("px4.trajectory_setpoint_topic", "/fmu/in/trajectory_setpoint");
     declare_parameter<std::string>("px4.vehicle_command_topic", "/fmu/in/vehicle_command");
-    declare_parameter<std::string>("px4.vehicle_status_topic", "/fmu/out/vehicle_status");
-    declare_parameter<std::string>("px4.vehicle_status_topic_secondary", "/fmu/out/vehicle_status_v1");
-    declare_parameter<std::string>("px4.vehicle_local_position_topic", "/fmu/out/vehicle_local_position");
-    declare_parameter<std::string>("px4.vehicle_local_position_topic_secondary", "/fmu/out/vehicle_local_position_v1");
+    declare_parameter<std::string>("px4.vehicle_status_topic",
+      px4VersionedTopic<px4_msgs::msg::VehicleStatus>("/fmu/out/vehicle_status"));
+    declare_parameter<std::string>("px4.vehicle_local_position_topic",
+      px4VersionedTopic<px4_msgs::msg::VehicleLocalPosition>(
+        "/fmu/out/vehicle_local_position"));
     declare_parameter<std::string>("px4.vehicle_odometry_topic", "/fmu/out/vehicle_odometry");
     declare_parameter<int>("px4.target_system", 1);
     declare_parameter<int>("px4.target_component", 1);
@@ -292,26 +352,33 @@ private:
     declare_parameter<std::string>(
       "trajName", "figure8_horizontal",
       describeParameter(
-        "Trajectory name: figure8_horizontal, figure8_vertical, helix_flip, helix_flip_y, flip_loop_sine, fast_circle."));
+        "Trajectory name: figure8_horizontal, figure8_vertical, helix_flip, helix_flip_y, "
+        "flip_loop_sine, fast_circle."));
     declare_parameter<int>(
       "trajectory_type", 1,
       describeInteger(
-        "ROS1-style trajectory selector: 1 figure8_horizontal, 2 figure8_vertical, 3 helix_flip, 4 helix_flip_y, 5 flip_loop_sine, 6 fast_circle.",
+        "ROS 1-style trajectory selector: 1 figure8_horizontal, 2 figure8_vertical, "
+        "3 helix_flip, 4 helix_flip_y, 5 flip_loop_sine, 6 fast_circle.",
         1, 6, 1));
     declare_parameter<double>(
       "omega_value", 0.5,
       describeDouble("Fixed trajectory angular rate omega.value [rad/s].", 0.01, 4.0, 0.01));
     declare_parameter<double>(
       "path_preview_cycles", 10.0,
-      describeDouble("RViz path preview length for periodic trajectories [cycles].", 1.0, 50.0, 1.0));
+      describeDouble("RViz path preview length for periodic trajectories [cycles].", 1.0, 50.0,
+      1.0));
     declare_parameter<bool>(
-      "trajectory_yaw_lock", false, describeParameter("Use trajectory_yaw_fixed instead of trajectory heading."));
+      "trajectory_yaw_lock", false,
+      describeParameter("Use trajectory_yaw_fixed instead of trajectory heading."));
     declare_parameter<double>(
-      "trajectory_yaw_fixed", 0.0, describeDouble("Fixed yaw when trajectory_yaw_lock is true [rad].", -kPi, kPi, 0.01));
+      "trajectory_yaw_fixed", 0.0,
+      describeDouble("Fixed yaw when trajectory_yaw_lock is true [rad].", -kPi, kPi, 0.01));
     declare_parameter<double>(
-      "origin_x", 0.0, describeDouble("Trajectory origin x in PX4 NED frame [m].", -20.0, 20.0, 0.1));
+      "origin_x", 0.0,
+      describeDouble("Trajectory origin x in PX4 NED frame [m].", -20.0, 20.0, 0.1));
     declare_parameter<double>(
-      "origin_y", 0.0, describeDouble("Trajectory origin y in PX4 NED frame [m].", -20.0, 20.0, 0.1));
+      "origin_y", 0.0,
+      describeDouble("Trajectory origin y in PX4 NED frame [m].", -20.0, 20.0, 0.1));
 
     declare_parameter<double>(
       "figure8_horizontal_Ax", 2.0, describeDouble("figure8_horizontal.Ax [m].", 0.1, 10.0, 0.1));
@@ -320,7 +387,8 @@ private:
     declare_parameter<double>(
       "figure8_horizontal_Hc", 3.0, describeDouble("figure8_horizontal.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
-      "figure8_horizontal_theta0", 0.0, describeDouble("figure8_horizontal.theta0 [rad].", -kPi, kPi, 0.01));
+      "figure8_horizontal_theta0", 0.0,
+      describeDouble("figure8_horizontal.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
       "figure8_vertical_Ay", 2.0, describeDouble("figure8_vertical.Ay [m].", 0.1, 10.0, 0.1));
@@ -363,7 +431,8 @@ private:
     declare_parameter<double>(
       "flip_loop_sine_Vx", 0.0, describeDouble("flip_loop_sine.Vx [m/s].", -5.0, 5.0, 0.1));
     declare_parameter<double>(
-      "flip_loop_sine_theta0", 0.0, describeDouble("flip_loop_sine.theta0 [rad].", -kPi, kPi, 0.01));
+      "flip_loop_sine_theta0", 0.0,
+      describeDouble("flip_loop_sine.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
       "fast_circle_Ax", 3.0, describeDouble("fast_circle.Ax [m].", 0.1, 10.0, 0.1));
@@ -382,7 +451,14 @@ private:
     arm_on_start_ = get_parameter("offboard.arm_on_start").as_bool();
     prearm_setpoints_ =
       static_cast<int>(std::max<int64_t>(0, get_parameter("offboard.prearm_setpoints").as_int()));
-    publish_rate_hz_ = std::max(2.1, get_parameter("offboard.publish_rate_hz").as_double());
+    const double legacy_publish_rate_hz = get_parameter("offboard.publish_rate_hz").as_double();
+    const double requested_setpoint_rate_hz = legacy_publish_rate_hz > 0.0 ?
+      legacy_publish_rate_hz : get_parameter("offboard.setpoint_rate_hz").as_double();
+    setpoint_rate_hz_ =
+      std::clamp(requested_setpoint_rate_hz, kSetpointRateHzMin, kSetpointRateHzMax);
+    heartbeat_rate_hz_ = std::clamp(
+      get_parameter("offboard.heartbeat_rate_hz").as_double(), kHeartbeatRateHzMin,
+      kHeartbeatRateHzMax);
     auto_start_retry_period_s_ =
       std::max(0.2, get_parameter("offboard.auto_start_retry_period_s").as_double());
     takeoff_before_trajectory_ = get_parameter("offboard.takeoff_before_trajectory").as_bool();
@@ -397,34 +473,36 @@ private:
     setpoint_level_ = normalizeSetpointLevel(get_parameter("setpoint.level").as_string());
     velocity_feedforward_ = get_parameter("setpoint.velocity_feedforward").as_bool();
     acceleration_feedforward_ = get_parameter("setpoint.acceleration_feedforward").as_bool();
-    jerk_logging_ = get_parameter("setpoint.jerk_logging").as_bool();
     yaw_rate_feedforward_ = get_parameter("setpoint.yaw_rate_feedforward").as_bool();
 
     offboard_control_mode_topic_ = get_parameter("px4.offboard_control_mode_topic").as_string();
     trajectory_setpoint_topic_ = get_parameter("px4.trajectory_setpoint_topic").as_string();
     vehicle_command_topic_ = get_parameter("px4.vehicle_command_topic").as_string();
     vehicle_status_topic_ = get_parameter("px4.vehicle_status_topic").as_string();
-    vehicle_status_topic_secondary_ = get_parameter("px4.vehicle_status_topic_secondary").as_string();
     vehicle_local_position_topic_ = get_parameter("px4.vehicle_local_position_topic").as_string();
-    vehicle_local_position_topic_secondary_ =
-      get_parameter("px4.vehicle_local_position_topic_secondary").as_string();
     vehicle_odometry_topic_ = get_parameter("px4.vehicle_odometry_topic").as_string();
-    target_system_ =
-      static_cast<uint8_t>(std::max<int64_t>(1, get_parameter("px4.target_system").as_int()));
-    target_component_ =
-      static_cast<uint8_t>(std::max<int64_t>(1, get_parameter("px4.target_component").as_int()));
-    source_system_ =
-      static_cast<uint8_t>(std::max<int64_t>(1, get_parameter("px4.source_system").as_int()));
-    source_component_ =
-      static_cast<uint8_t>(std::max<int64_t>(1, get_parameter("px4.source_component").as_int()));
+    target_system_ = static_cast<uint8_t>(
+      std::clamp<int64_t>(get_parameter("px4.target_system").as_int(), kMavlinkIdMin,
+      kMavlinkIdMax));
+    target_component_ = static_cast<uint8_t>(
+      std::clamp<int64_t>(get_parameter("px4.target_component").as_int(), kMavlinkIdMin,
+      kMavlinkIdMax));
+    source_system_ = static_cast<uint8_t>(
+      std::clamp<int64_t>(get_parameter("px4.source_system").as_int(), kMavlinkIdMin,
+      kMavlinkIdMax));
+    source_component_ = static_cast<uint8_t>(
+      std::clamp<int64_t>(get_parameter("px4.source_component").as_int(), kMavlinkIdMin,
+      kMavlinkIdMax));
 
     visualization_path_topic_ = get_parameter("visualization.path_topic").as_string();
     visualization_pose_topic_ = get_parameter("visualization.current_pose_topic").as_string();
-    visualization_vehicle_pose_topic_ = get_parameter("visualization.vehicle_pose_topic").as_string();
+    visualization_vehicle_pose_topic_ =
+      get_parameter("visualization.vehicle_pose_topic").as_string();
     visualization_frame_id_ = get_parameter("visualization.frame_id").as_string();
     visualization_ned_to_enu_ = get_parameter("visualization.ned_to_enu").as_bool();
     preview_points_ =
-      static_cast<int>(std::max<int64_t>(2, get_parameter("visualization.preview_points").as_int()));
+      static_cast<int>(std::max<int64_t>(2,
+      get_parameter("visualization.preview_points").as_int()));
     path_publish_period_s_ =
       std::max(0.05, get_parameter("visualization.path_publish_period_s").as_double());
 
@@ -434,10 +512,12 @@ private:
       std::clamp<int64_t>(get_parameter("trajectory_type").as_int(), 1, 6));
     if (prefer_trajectory_type_) {
       trajectory_type_ = trajectory_type_from_param;
-      trajectory_parameters_.traj_name = geometric_controller::trajectoryTypeNameFromId(trajectory_type_);
+      trajectory_parameters_.traj_name =
+        geometric_controller::trajectoryTypeNameFromId(trajectory_type_);
     } else {
       trajectory_parameters_.traj_name = traj_name_from_param;
-      trajectory_type_ = geometric_controller::trajectoryTypeIdFromName(trajectory_parameters_.traj_name);
+      trajectory_type_ =
+        geometric_controller::trajectoryTypeIdFromName(trajectory_parameters_.traj_name);
     }
     trajectory_parameters_.omega_value = get_parameter("omega_value").as_double();
     trajectory_parameters_.path_preview_cycles = get_parameter("path_preview_cycles").as_double();
@@ -446,14 +526,19 @@ private:
     trajectory_parameters_.origin_x = get_parameter("origin_x").as_double();
     trajectory_parameters_.origin_y = get_parameter("origin_y").as_double();
 
-    trajectory_parameters_.figure8_horizontal_Ax = get_parameter("figure8_horizontal_Ax").as_double();
-    trajectory_parameters_.figure8_horizontal_Ay = get_parameter("figure8_horizontal_Ay").as_double();
-    trajectory_parameters_.figure8_horizontal_Hc = get_parameter("figure8_horizontal_Hc").as_double();
-    trajectory_parameters_.figure8_horizontal_theta0 = get_parameter("figure8_horizontal_theta0").as_double();
+    trajectory_parameters_.figure8_horizontal_Ax =
+      get_parameter("figure8_horizontal_Ax").as_double();
+    trajectory_parameters_.figure8_horizontal_Ay =
+      get_parameter("figure8_horizontal_Ay").as_double();
+    trajectory_parameters_.figure8_horizontal_Hc =
+      get_parameter("figure8_horizontal_Hc").as_double();
+    trajectory_parameters_.figure8_horizontal_theta0 =
+      get_parameter("figure8_horizontal_theta0").as_double();
     trajectory_parameters_.figure8_vertical_Ay = get_parameter("figure8_vertical_Ay").as_double();
     trajectory_parameters_.figure8_vertical_Az = get_parameter("figure8_vertical_Az").as_double();
     trajectory_parameters_.figure8_vertical_Hc = get_parameter("figure8_vertical_Hc").as_double();
-    trajectory_parameters_.figure8_vertical_theta0 = get_parameter("figure8_vertical_theta0").as_double();
+    trajectory_parameters_.figure8_vertical_theta0 =
+      get_parameter("figure8_vertical_theta0").as_double();
     trajectory_parameters_.helix_flip_Ay = get_parameter("helix_flip_Ay").as_double();
     trajectory_parameters_.helix_flip_Az = get_parameter("helix_flip_Az").as_double();
     trajectory_parameters_.helix_flip_Hc = get_parameter("helix_flip_Hc").as_double();
@@ -468,7 +553,8 @@ private:
     trajectory_parameters_.flip_loop_sine_Az = get_parameter("flip_loop_sine_Az").as_double();
     trajectory_parameters_.flip_loop_sine_Hc = get_parameter("flip_loop_sine_Hc").as_double();
     trajectory_parameters_.flip_loop_sine_Vx = get_parameter("flip_loop_sine_Vx").as_double();
-    trajectory_parameters_.flip_loop_sine_theta0 = get_parameter("flip_loop_sine_theta0").as_double();
+    trajectory_parameters_.flip_loop_sine_theta0 =
+      get_parameter("flip_loop_sine_theta0").as_double();
     trajectory_parameters_.fast_circle_Ax = get_parameter("fast_circle_Ax").as_double();
     trajectory_parameters_.fast_circle_Ay = get_parameter("fast_circle_Ay").as_double();
     trajectory_parameters_.fast_circle_Hc = get_parameter("fast_circle_Hc").as_double();
@@ -477,16 +563,17 @@ private:
 
   void configureRosInterfaces()
   {
-    auto px4_pub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
-    px4_pub_qos.best_effort();
-    px4_pub_qos.transient_local();
+    auto px4_pub_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    px4_pub_qos.reliable();
+    px4_pub_qos.durability_volatile();
 
     auto px4_sub_qos = rclcpp::QoS(rclcpp::KeepLast(5));
     px4_sub_qos.best_effort();
     px4_sub_qos.durability_volatile();
 
     offboard_control_mode_publisher_ =
-      create_publisher<px4_msgs::msg::OffboardControlMode>(offboard_control_mode_topic_, px4_pub_qos);
+      create_publisher<px4_msgs::msg::OffboardControlMode>(offboard_control_mode_topic_,
+      px4_pub_qos);
     trajectory_setpoint_publisher_ =
       create_publisher<px4_msgs::msg::TrajectorySetpoint>(trajectory_setpoint_topic_, px4_pub_qos);
     vehicle_command_publisher_ =
@@ -497,25 +584,11 @@ private:
         vehicle_status_topic_, px4_sub_qos,
         std::bind(&TrajectoryOffboardNode::vehicleStatusCallback, this, std::placeholders::_1));
     }
-    if (!vehicle_status_topic_secondary_.empty() &&
-      vehicle_status_topic_secondary_ != vehicle_status_topic_)
-    {
-      vehicle_status_secondary_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
-        vehicle_status_topic_secondary_, px4_sub_qos,
-        std::bind(&TrajectoryOffboardNode::vehicleStatusCallback, this, std::placeholders::_1));
-    }
     if (!vehicle_local_position_topic_.empty()) {
       vehicle_local_position_subscriber_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
         vehicle_local_position_topic_, px4_sub_qos,
-        std::bind(&TrajectoryOffboardNode::vehicleLocalPositionCallback, this, std::placeholders::_1));
-    }
-    if (!vehicle_local_position_topic_secondary_.empty() &&
-      vehicle_local_position_topic_secondary_ != vehicle_local_position_topic_)
-    {
-      vehicle_local_position_secondary_subscriber_ =
-        create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-        vehicle_local_position_topic_secondary_, px4_sub_qos,
-        std::bind(&TrajectoryOffboardNode::vehicleLocalPositionCallback, this, std::placeholders::_1));
+        std::bind(&TrajectoryOffboardNode::vehicleLocalPositionCallback, this,
+        std::placeholders::_1));
     }
     if (!vehicle_odometry_topic_.empty()) {
       vehicle_odometry_subscriber_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
@@ -523,21 +596,40 @@ private:
         std::bind(&TrajectoryOffboardNode::vehicleOdometryCallback, this, std::placeholders::_1));
     }
 
-    reference_path_publisher_ = create_publisher<nav_msgs::msg::Path>(visualization_path_topic_, 10);
+    reference_path_publisher_ = create_publisher<nav_msgs::msg::Path>(visualization_path_topic_,
+      10);
     reference_pose_publisher_ =
       create_publisher<geometry_msgs::msg::PoseStamped>(visualization_pose_topic_, 10);
     vehicle_pose_publisher_ =
       create_publisher<geometry_msgs::msg::PoseStamped>(visualization_vehicle_pose_topic_, 10);
   }
 
-  void configureTimer()
+  void configureTimers()
   {
-    if (timer_) {
-      timer_->cancel();
+    configureSetpointTimer();
+    configureHeartbeatTimer();
+  }
+
+  void configureSetpointTimer()
+  {
+    if (setpoint_timer_) {
+      setpoint_timer_->cancel();
     }
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(1.0 / publish_rate_hz_));
-    timer_ = create_wall_timer(period, std::bind(&TrajectoryOffboardNode::timerCallback, this));
+      std::chrono::duration<double>(1.0 / setpoint_rate_hz_));
+    setpoint_timer_ =
+      create_wall_timer(period, std::bind(&TrajectoryOffboardNode::setpointTimerCallback, this));
+  }
+
+  void configureHeartbeatTimer()
+  {
+    if (heartbeat_timer_) {
+      heartbeat_timer_->cancel();
+    }
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(1.0 / heartbeat_rate_hz_));
+    heartbeat_timer_ =
+      create_wall_timer(period, std::bind(&TrajectoryOffboardNode::heartbeatTimerCallback, this));
   }
 
   rcl_interfaces::msg::SetParametersResult onSetParameters(
@@ -560,21 +652,32 @@ private:
         result.reason = "Unsupported trajName";
         return result;
       }
-      if (name == "trajectory_type" && parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
+      if (name == "trajectory_type" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
         (parameter.as_int() < 1 || parameter.as_int() > 6))
       {
         result.successful = false;
         result.reason = "trajectory_type must be in [1, 6]";
         return result;
       }
-      if (name == "setpoint.level" && parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
+      if (name == "setpoint.level" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
         normalizeSetpointLevel(parameter.as_string()) == "invalid")
       {
         result.successful = false;
         result.reason = "setpoint.level must be position, velocity, or acceleration";
         return result;
       }
-      if ((name == "offboard.publish_rate_hz" || name == "offboard.auto_start_retry_period_s" ||
+      if ((name == "px4.target_system" || name == "px4.target_component" ||
+        name == "px4.source_system" || name == "px4.source_component") &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
+        (parameter.as_int() < kMavlinkIdMin || parameter.as_int() > kMavlinkIdMax))
+      {
+        result.successful = false;
+        result.reason = name + " must be in [1, 255]";
+        return result;
+      }
+      if ((name == "offboard.auto_start_retry_period_s" ||
         name == "offboard.start_transition_duration_s" || name == "omega_value") &&
         parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
         parameter.as_double() <= 0.0)
@@ -582,6 +685,34 @@ private:
         result.successful = false;
         result.reason = name + " must be positive";
         return result;
+      }
+      if (name == "offboard.setpoint_rate_hz" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), kSetpointRateHzMin, kSetpointRateHzMax))
+      {
+        result.successful = false;
+        result.reason = "offboard.setpoint_rate_hz must be in [50, 250]";
+        return result;
+      }
+      if (name == "offboard.heartbeat_rate_hz" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), kHeartbeatRateHzMin, kHeartbeatRateHzMax))
+      {
+        result.successful = false;
+        result.reason = "offboard.heartbeat_rate_hz must be in [3, 10]";
+        return result;
+      }
+      if (name == "offboard.publish_rate_hz" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+      {
+        const double rate_hz = parameter.as_double();
+        if (rate_hz < 0.0 ||
+          (rate_hz > 0.0 && !isInClosedRange(rate_hz, kSetpointRateHzMin, kSetpointRateHzMax)))
+        {
+          result.successful = false;
+          result.reason = "offboard.publish_rate_hz must be 0 or in [50, 250]";
+          return result;
+        }
       }
 
       if (parameterAffectsTrajectoryRestart(name)) {
@@ -608,20 +739,21 @@ private:
 
   bool parameterAffectsTrajectoryRestart(const std::string & name) const
   {
-    if (name == "trajName" || name == "trajectory_type" || name == "origin_x" || name == "origin_y" ||
+    if (name == "trajName" || name == "trajectory_type" || name == "origin_x" ||
+      name == "origin_y" ||
       name == "offboard.takeoff_before_trajectory" || name == "offboard.use_start_transition" ||
       name == "offboard.start_transition_duration_s")
     {
       return true;
     }
     return startsWith(name, "figure8_") || startsWith(name, "helix_") ||
-      startsWith(name, "flip_loop_") || startsWith(name, "fast_circle_");
+           startsWith(name, "flip_loop_") || startsWith(name, "fast_circle_");
   }
 
   static std::string normalizeSetpointLevel(std::string value)
   {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-      return static_cast<char>(std::tolower(c));
+        return static_cast<char>(std::tolower(c));
     });
     std::replace(value.begin(), value.end(), '-', '_');
     if (value == "position" || value == "pos") {
@@ -636,20 +768,24 @@ private:
     return "invalid";
   }
 
+  static bool isInClosedRange(double value, double min, double max)
+  {
+    return std::isfinite(value) && value >= min && value <= max;
+  }
+
   void applyPendingParameters()
   {
     if (!parameters_pending_) {
       return;
     }
 
-    const double previous_rate = publish_rate_hz_;
+    const double previous_setpoint_rate = setpoint_rate_hz_;
+    const double previous_heartbeat_rate = heartbeat_rate_hz_;
     const std::string previous_offboard_topic = offboard_control_mode_topic_;
     const std::string previous_trajectory_topic = trajectory_setpoint_topic_;
     const std::string previous_command_topic = vehicle_command_topic_;
     const std::string previous_status_topic = vehicle_status_topic_;
-    const std::string previous_status_secondary_topic = vehicle_status_topic_secondary_;
     const std::string previous_local_position_topic = vehicle_local_position_topic_;
-    const std::string previous_local_position_secondary_topic = vehicle_local_position_topic_secondary_;
     const std::string previous_odometry_topic = vehicle_odometry_topic_;
     const std::string previous_path_topic = visualization_path_topic_;
     const std::string previous_pose_topic = visualization_pose_topic_;
@@ -657,7 +793,8 @@ private:
     const bool preserve_phase =
       !trajectory_reset_pending_ && (trajectory_started_ || !takeoff_before_trajectory_);
     const double elapsed_time_s = std::max(0.0, (now() - start_time_).seconds());
-    const double previous_theta = preserve_phase ? reference_trajectory_.theta(elapsed_time_s) : 0.0;
+    const double previous_theta =
+      preserve_phase ? reference_trajectory_.theta(elapsed_time_s) : 0.0;
 
     loadParameters();
     syncSelectorParameters();
@@ -670,7 +807,8 @@ private:
         trajectory_parameters_.phase_shift += theta_delta;
         RCLCPP_INFO(
           get_logger(),
-          "Trajectory omega updated with continuous phase: trajName=%s omega_value=%.3f phase_shift=%.3f",
+          "Trajectory omega updated with continuous phase: trajName=%s omega_value=%.3f "
+          "phase_shift=%.3f",
           trajectory_parameters_.traj_name.c_str(), trajectory_parameters_.omega_value,
           trajectory_parameters_.phase_shift);
       }
@@ -683,9 +821,7 @@ private:
       previous_trajectory_topic != trajectory_setpoint_topic_ ||
       previous_command_topic != vehicle_command_topic_ ||
       previous_status_topic != vehicle_status_topic_ ||
-      previous_status_secondary_topic != vehicle_status_topic_secondary_ ||
       previous_local_position_topic != vehicle_local_position_topic_ ||
-      previous_local_position_secondary_topic != vehicle_local_position_topic_secondary_ ||
       previous_odometry_topic != vehicle_odometry_topic_ ||
       previous_path_topic != visualization_path_topic_ ||
       previous_pose_topic != visualization_pose_topic_ ||
@@ -694,8 +830,11 @@ private:
     if (topics_changed) {
       configureRosInterfaces();
     }
-    if (std::abs(previous_rate - publish_rate_hz_) > 1e-6) {
-      configureTimer();
+    if (std::abs(previous_setpoint_rate - setpoint_rate_hz_) > 1e-6) {
+      configureSetpointTimer();
+    }
+    if (std::abs(previous_heartbeat_rate - heartbeat_rate_hz_) > 1e-6) {
+      configureHeartbeatTimer();
     }
     if (trajectory_reset_pending_) {
       resetTrajectoryStart("trajectory parameters changed");
@@ -718,13 +857,16 @@ private:
     trajectory_started_ = false;
     start_transition_active_ = false;
     start_transition_finished_ = false;
-    offboard_setpoint_counter_ = 0;
-    offboard_command_sent_ = false;
+    offboard_heartbeat_counter_ = 0;
+    trajectory_setpoint_gate_open_ = false;
+    auto_start_ready_logged_ = false;
+    auto_start_requested_ = false;
     last_auto_start_command_time_s_ = -std::numeric_limits<double>::infinity();
+    last_auto_start_wait_log_time_s_ = -std::numeric_limits<double>::infinity();
     RCLCPP_INFO(get_logger(), "Trajectory reset: %s", reason.c_str());
   }
 
-  void timerCallback()
+  void setpointTimerCallback()
   {
     applyPendingParameters();
 
@@ -736,22 +878,80 @@ private:
       return;
     }
 
-    publishOffboardControlMode(stamp);
-    publishTrajectorySetpoint(setpoint, stamp);
-
-    maybeSendAutoStartCommands(stamp);
-    if (offboard_setpoint_counter_ < static_cast<uint64_t>(prearm_setpoints_ + 1)) {
-      ++offboard_setpoint_counter_;
+    if (!shouldPublishTrajectorySetpoint()) {
+      if (trajectory_setpoint_gate_open_) {
+        trajectory_setpoint_gate_open_ = false;
+        RCLCPP_WARN(
+          get_logger(), "Withholding TrajectorySetpoint messages until local position is valid.");
+      }
+      return;
     }
+
+    if (!trajectory_setpoint_gate_open_) {
+      trajectory_setpoint_gate_open_ = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "Local position is valid; publishing TrajectorySetpoint at %.1f Hz for Offboard.",
+        setpoint_rate_hz_);
+    }
+    publishTrajectorySetpoint(setpoint, stamp);
+  }
+
+  void heartbeatTimerCallback()
+  {
+    applyPendingParameters();
+
+    if (!offboard_enabled_) {
+      return;
+    }
+
+    const auto stamp = now();
+    warnIfVehicleStatusMissing(stamp);
+    publishOffboardControlMode(stamp);
+    maybeSendAutoStartCommands(stamp);
+    if (offboard_heartbeat_counter_ < static_cast<uint64_t>(prearm_setpoints_ + 1)) {
+      ++offboard_heartbeat_counter_;
+    }
+  }
+
+  void warnIfVehicleStatusMissing(const rclcpp::Time & stamp)
+  {
+    if (status_received_) {
+      return;
+    }
+
+    const double elapsed_s = std::max(0.0, (stamp - start_time_).seconds());
+    if (elapsed_s < kStatusTopicWarningDelayS ||
+      stamp.seconds() - last_status_topic_warning_time_s_ < kStatusTopicWarningPeriodS)
+    {
+      return;
+    }
+    last_status_topic_warning_time_s_ = stamp.seconds();
+
+    RCLCPP_WARN(
+      get_logger(),
+      "No PX4 VehicleStatus received on '%s' after %.1f s. Check that PX4 SITL, "
+      "Micro XRCE-DDS Agent, and QGroundControl are running.",
+      vehicle_status_topic_.c_str(), elapsed_s);
   }
 
   void maybeSendAutoStartCommands(const rclcpp::Time & stamp)
   {
-    if (!auto_start_ || offboard_setpoint_counter_ < static_cast<uint64_t>(prearm_setpoints_)) {
+    if (!auto_start_ || offboard_heartbeat_counter_ < static_cast<uint64_t>(prearm_setpoints_)) {
       return;
     }
     if (isOffboardAndArmed()) {
       return;
+    }
+    const auto blocker = autoStartReadinessBlocker();
+    if (!blocker.empty()) {
+      logAutoStartWait(stamp, blocker);
+      return;
+    }
+    if (!auto_start_ready_logged_) {
+      auto_start_ready_logged_ = true;
+      RCLCPP_INFO(
+        get_logger(), "Ready to request takeoff: PX4 local position is valid.");
     }
     if (stamp.seconds() - last_auto_start_command_time_s_ < auto_start_retry_period_s_) {
       return;
@@ -763,7 +963,7 @@ private:
     if (arm_on_start_ && !isArmed()) {
       arm();
     }
-    offboard_command_sent_ = true;
+    auto_start_requested_ = true;
     last_auto_start_command_time_s_ = stamp.seconds();
   }
 
@@ -784,8 +984,17 @@ private:
       start_sample.yaw_acceleration = 0.0;
       const auto start_target_position = start_sample.position;
 
-      if (use_start_transition_ && localPositionValid() && !start_transition_finished_)
-      {
+      if (offboard_enabled_ && !readyForStartTransition()) {
+        logTakeoffProgress(
+          start_target_position, stamp,
+          auto_start_requested_ ? "waiting for Offboard/Arm" : "waiting to request Offboard/Arm");
+        if (localPositionValid()) {
+          return currentPositionHoldSample(start_sample);
+        }
+        return start_sample;
+      }
+
+      if (use_start_transition_ && localPositionValid() && !start_transition_finished_) {
         if (!start_transition_active_) {
           startStartTransition(start_sample, stamp);
         }
@@ -810,9 +1019,65 @@ private:
     return reference_trajectory_.sample(t);
   }
 
+  geometric_controller::TrajectorySample currentPositionHoldSample(
+    const geometric_controller::TrajectorySample & target) const
+  {
+    auto sample = target;
+    sample.position = {
+      static_cast<double>(vehicle_local_position_.x),
+      static_cast<double>(vehicle_local_position_.y),
+      static_cast<double>(vehicle_local_position_.z)};
+    sample.velocity = {0.0, 0.0, 0.0};
+    sample.acceleration = {0.0, 0.0, 0.0};
+    sample.jerk = {0.0, 0.0, 0.0};
+    sample.snap = {0.0, 0.0, 0.0};
+    sample.yaw_rate = 0.0;
+    sample.yaw_acceleration = 0.0;
+    return sample;
+  }
+
   bool isOffboardAndArmed() const
   {
     return isOffboard() && isArmed();
+  }
+
+  bool readyForStartTransition() const
+  {
+    if (!offboard_enabled_) {
+      return true;
+    }
+    if (auto_start_ && auto_start_requested_) {
+      return true;
+    }
+    if (status_received_) {
+      return isOffboard() && (!arm_on_start_ || isArmed());
+    }
+    return false;
+  }
+
+  bool shouldPublishTrajectorySetpoint() const
+  {
+    return localPositionValid();
+  }
+
+  std::string autoStartReadinessBlocker() const
+  {
+    if (!local_position_received_) {
+      return "waiting for PX4 local position on '" + vehicle_local_position_topic_ + "'";
+    }
+    if (!localPositionValid()) {
+      return "waiting for valid PX4 local position on '" + vehicle_local_position_topic_ + "'";
+    }
+    return {};
+  }
+
+  void logAutoStartWait(const rclcpp::Time & stamp, const std::string & reason)
+  {
+    if (stamp.seconds() - last_auto_start_wait_log_time_s_ < 2.0) {
+      return;
+    }
+    last_auto_start_wait_log_time_s_ = stamp.seconds();
+    RCLCPP_WARN(get_logger(), "Waiting to request Offboard/Arm: %s.", reason.c_str());
   }
 
   void startStartTransition(
@@ -837,7 +1102,8 @@ private:
 
     RCLCPP_INFO(
       get_logger(),
-      "Start transition: current NED [%.2f, %.2f, %.2f] -> target NED [%.2f, %.2f, %.2f] in %.2f s.",
+      "Start transition: current NED [%.2f, %.2f, %.2f] -> target NED "
+      "[%.2f, %.2f, %.2f] in %.2f s.",
       current_position[0], current_position[1], current_position[2],
       target.position[0], target.position[1], target.position[2], start_transition_duration_s_);
   }
@@ -900,7 +1166,8 @@ private:
       "Waiting before trajectory start: %s. current NED [%.2f, %.2f, %.2f], target NED "
       "[%.2f, %.2f, %.2f], distance=%.2f m, speed=%.2f m/s, valid xy=%s z=%s.",
       reason.c_str(), static_cast<double>(vehicle_local_position_.x),
-      static_cast<double>(vehicle_local_position_.y), static_cast<double>(vehicle_local_position_.z),
+      static_cast<double>(vehicle_local_position_.y),
+      static_cast<double>(vehicle_local_position_.z),
       target[0], target[1], target[2], distance, speed,
       vehicle_local_position_.xy_valid ? "true" : "false",
       vehicle_local_position_.z_valid ? "true" : "false");
@@ -909,18 +1176,19 @@ private:
   bool isOffboard() const
   {
     return status_received_ &&
-      vehicle_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
+           vehicle_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
   }
 
   bool isArmed() const
   {
     return status_received_ &&
-      vehicle_status_.arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
+           vehicle_status_.arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
   }
 
   bool localPositionValid() const
   {
-    return local_position_received_ && vehicle_local_position_.xy_valid && vehicle_local_position_.z_valid;
+    return local_position_received_ && vehicle_local_position_.xy_valid &&
+           vehicle_local_position_.z_valid;
   }
 
   bool takeoffTargetReached(const geometric_controller::Vector3 & target) const
@@ -988,9 +1256,6 @@ private:
       msg.acceleration = toFloatArray(sample.acceleration);
     }
 
-    if (jerk_logging_) {
-      msg.jerk = toFloatArray(sample.jerk);
-    }
     msg.yaw = finiteFloatOrNan(sample.yaw);
     msg.yawspeed = yaw_rate_feedforward_ ? finiteFloatOrNan(sample.yaw_rate) :
       std::numeric_limits<float>::quiet_NaN();
@@ -1091,18 +1356,23 @@ private:
 
   void engageOffboardMode()
   {
-    publishVehicleCommand(px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 6.0f);
+    publishVehicleCommand(
+      px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE,
+      kMavModeFlagCustomModeEnabled, kPx4CustomMainModeOffboard);
     RCLCPP_INFO(get_logger(), "Offboard mode command sent");
   }
 
   void arm()
   {
     publishVehicleCommand(
-      px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f, 0.0f);
+      px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM,
+      kVehicleCommandArm, kVehicleCommandParamUnused);
     RCLCPP_INFO(get_logger(), "Arm command sent");
   }
 
-  void publishVehicleCommand(uint32_t command, float param1 = 0.0f, float param2 = 0.0f)
+  void publishVehicleCommand(
+    uint32_t command, float param1 = kVehicleCommandParamUnused,
+    float param2 = kVehicleCommandParamUnused)
   {
     px4_msgs::msg::VehicleCommand msg{};
     msg.param1 = param1;
@@ -1134,10 +1404,9 @@ private:
       previous_arming_state != vehicle_status_.arming_state)
     {
       RCLCPP_INFO(
-        get_logger(), "PX4 status: nav_state=%u arming_state=%u accepts_offboard=%s",
+        get_logger(), "PX4 status: nav_state=%u arming_state=%u",
         static_cast<unsigned int>(vehicle_status_.nav_state),
-        static_cast<unsigned int>(vehicle_status_.arming_state),
-        vehicle_status_.accepts_offboard_setpoints ? "true" : "false");
+        static_cast<unsigned int>(vehicle_status_.arming_state));
     }
   }
 
@@ -1163,10 +1432,10 @@ private:
   bool use_start_transition_{true};
   bool velocity_feedforward_{true};
   bool acceleration_feedforward_{true};
-  bool jerk_logging_{false};
   bool yaw_rate_feedforward_{true};
   int prearm_setpoints_{10};
-  double publish_rate_hz_{50.0};
+  double setpoint_rate_hz_{kSetpointRateHzDefault};
+  double heartbeat_rate_hz_{kHeartbeatRateHzDefault};
   double auto_start_retry_period_s_{1.0};
   double start_transition_duration_s_{4.0};
   double takeoff_position_tolerance_{0.25};
@@ -1177,9 +1446,7 @@ private:
   std::string trajectory_setpoint_topic_;
   std::string vehicle_command_topic_;
   std::string vehicle_status_topic_;
-  std::string vehicle_status_topic_secondary_;
   std::string vehicle_local_position_topic_;
-  std::string vehicle_local_position_topic_secondary_;
   std::string vehicle_odometry_topic_;
   std::string visualization_path_topic_;
   std::string visualization_pose_topic_;
@@ -1195,7 +1462,8 @@ private:
   uint8_t source_system_{1};
   uint8_t source_component_{1};
 
-  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr setpoint_timer_;
+  rclcpp::TimerBase::SharedPtr heartbeat_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
@@ -1204,11 +1472,10 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr reference_pose_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr vehicle_pose_publisher_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_secondary_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_position_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
-    vehicle_local_position_secondary_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
+    vehicle_local_position_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr
+    vehicle_odometry_subscriber_;
 
   px4_msgs::msg::VehicleStatus vehicle_status_{};
   px4_msgs::msg::VehicleLocalPosition vehicle_local_position_{};
@@ -1221,15 +1488,19 @@ private:
   bool trajectory_started_{false};
   bool start_transition_active_{false};
   bool start_transition_finished_{false};
+  bool trajectory_setpoint_gate_open_{false};
+  bool auto_start_ready_logged_{false};
+  bool auto_start_requested_{false};
   bool prefer_trajectory_type_{false};
   bool syncing_selector_parameters_{false};
-  bool offboard_command_sent_{false};
   double last_auto_start_command_time_s_{-std::numeric_limits<double>::infinity()};
+  double last_auto_start_wait_log_time_s_{-std::numeric_limits<double>::infinity()};
   double last_takeoff_progress_log_time_s_{-std::numeric_limits<double>::infinity()};
+  double last_status_topic_warning_time_s_{-std::numeric_limits<double>::infinity()};
   int trajectory_type_{1};
   std::array<std::array<double, 6>, 3> start_transition_coefficients_{};
   rclcpp::Time start_transition_start_time_;
-  uint64_t offboard_setpoint_counter_{0};
+  uint64_t offboard_heartbeat_counter_{0};
   rclcpp::Time start_time_;
 };
 

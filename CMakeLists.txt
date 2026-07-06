@@ -1,3 +1,8 @@
+#
+# Copyright 2026 Chaoheng Meng
+# SPDX-License-Identifier: Apache-2.0
+#
+
 cmake_minimum_required(VERSION 3.8)
 project(geometric_controller)
 
@@ -5,7 +10,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
@@ -21,6 +25,7 @@ target_include_directories(reference_trajectory PUBLIC
 target_compile_features(reference_trajectory PUBLIC cxx_std_17)
 
 add_executable(trajectory_offboard_node src/geometric_controller_node.cpp)
+target_compile_features(trajectory_offboard_node PUBLIC cxx_std_17)
 target_link_libraries(trajectory_offboard_node reference_trajectory)
 ament_target_dependencies(trajectory_offboard_node
   rclcpp
@@ -36,29 +41,33 @@ ament_target_dependencies(trajectory_control_panel
   rclcpp
   rcl_interfaces)
 
+install(TARGETS reference_trajectory
+  EXPORT export_reference_trajectory
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib)
+
 install(TARGETS
-  reference_trajectory
   trajectory_offboard_node
   trajectory_control_panel
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY include/
   DESTINATION include)
 
-install(DIRECTORY launch config rviz
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+  FILES_MATCHING
+  PATTERN "*.launch.py"
+  PATTERN "__pycache__" EXCLUDE)
+
+install(DIRECTORY config rviz
   DESTINATION share/${PROJECT_NAME})
+
+ament_export_include_directories(include)
+ament_export_targets(export_reference_trajectory HAS_LIBRARY_TARGET)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
 

@@ -1,11 +1,15 @@
 trajectory_offboard_node:
   ros__parameters:
+    use_sim_time: false
+
     offboard:
       enabled: true
       auto_start: true
       arm_on_start: true
       prearm_setpoints: 10
-      publish_rate_hz: 50.0
+      setpoint_rate_hz: 100.0
+      heartbeat_rate_hz: 5.0
+      publish_rate_hz: 0.0
       auto_start_retry_period_s: 1.0
       takeoff_before_trajectory: true
       use_start_transition: true
@@ -17,17 +21,12 @@ trajectory_offboard_node:
       level: position
       velocity_feedforward: true
       acceleration_feedforward: true
-      jerk_logging: false
       yaw_rate_feedforward: true
 
     px4:
       offboard_control_mode_topic: /fmu/in/offboard_control_mode
       trajectory_setpoint_topic: /fmu/in/trajectory_setpoint
       vehicle_command_topic: /fmu/in/vehicle_command
-      vehicle_status_topic: /fmu/out/vehicle_status
-      vehicle_status_topic_secondary: /fmu/out/vehicle_status_v1
-      vehicle_local_position_topic: /fmu/out/vehicle_local_position
-      vehicle_local_position_topic_secondary: /fmu/out/vehicle_local_position_v1
       vehicle_odometry_topic: /fmu/out/vehicle_odometry
       target_system: 1
       target_component: 1

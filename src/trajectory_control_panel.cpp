@@ -1,8 +1,16 @@
-#include "geometric_controller/reference_trajectory.hpp"
-
-#include <rcl_interfaces/msg/set_parameters_result.hpp>
-#include <rclcpp/parameter_client.hpp>
-#include <rclcpp/rclcpp.hpp>
+// Copyright 2026 Chaoheng Meng
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include <QApplication>
 #include <QCheckBox>
@@ -27,6 +35,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
+#include <rclcpp/parameter_client.hpp>
+#include <rclcpp/rclcpp.hpp>
+
+#include "geometric_controller/reference_trajectory.hpp"
 
 namespace
 {
@@ -92,7 +106,8 @@ private:
     auto * yaw_group = new QGroupBox("Yaw");
     auto * yaw_form = new QFormLayout(yaw_group);
     addBool(yaw_form, "trajectory_yaw_lock", "trajectory_yaw_lock", false);
-    addDouble(yaw_form, "trajectory_yaw_fixed", "trajectory_yaw_fixed", 0.0, -3.1416, 3.1416, 0.01, 3, " rad");
+    addDouble(yaw_form, "trajectory_yaw_fixed", "trajectory_yaw_fixed", 0.0, -3.1416, 3.1416, 0.01,
+      3, " rad");
     main_layout->addWidget(yaw_group);
 
     auto * start_group = new QGroupBox("Start");
@@ -117,7 +132,7 @@ private:
     main_layout->addLayout(bottom_layout);
 
     QObject::connect(refresh_button, &QPushButton::clicked, [this]() {
-      syncFromTarget();
+        syncFromTarget();
     });
 
     setStatus("Waiting for " + QString::fromStdString(target_node_));
@@ -149,15 +164,15 @@ private:
     form->addRow("omega_value", row);
 
     QObject::connect(omega_slider_, &QSlider::valueChanged, [this](int raw_value) {
-      if (updating_ui_) {
-        return;
-      }
-      const double value = sliderToOmega(raw_value);
-      {
-        const QSignalBlocker blocker(omega_spin_);
-        omega_spin_->setValue(value);
-      }
-      setDoubleParameter("omega_value", value);
+        if (updating_ui_) {
+          return;
+        }
+        const double value = sliderToOmega(raw_value);
+        {
+          const QSignalBlocker blocker(omega_spin_);
+          omega_spin_->setValue(value);
+        }
+        setDoubleParameter("omega_value", value);
     });
 
     QObject::connect(
@@ -271,17 +286,19 @@ private:
     double_controls_[parameter_name] = spin;
     form->addRow(label, spin);
 
-    QObject::connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), [this, parameter_name](double value) {
-      if (!updating_ui_) {
-        setDoubleParameter(parameter_name, value);
-      }
+    QObject::connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+      [this, parameter_name](double value) {
+        if (!updating_ui_) {
+          setDoubleParameter(parameter_name, value);
+        }
     });
 
     return spin;
   }
 
   QCheckBox * addBool(
-    QFormLayout * form, const QString & label, const std::string & parameter_name, bool default_value)
+    QFormLayout * form, const QString & label, const std::string & parameter_name,
+    bool default_value)
   {
     registerParameter(parameter_name);
 
@@ -291,9 +308,9 @@ private:
     form->addRow(label, check_box);
 
     QObject::connect(check_box, &QCheckBox::toggled, [this, parameter_name](bool value) {
-      if (!updating_ui_) {
-        setBoolParameter(parameter_name, value);
-      }
+        if (!updating_ui_) {
+          setBoolParameter(parameter_name, value);
+        }
     });
 
     return check_box;
@@ -303,15 +320,15 @@ private:
   {
     ros_timer_ = new QTimer(window_.get());
     QObject::connect(ros_timer_, &QTimer::timeout, [this]() {
-      rclcpp::spin_some(node_);
+        rclcpp::spin_some(node_);
     });
     ros_timer_->start(20);
 
     sync_timer_ = new QTimer(window_.get());
     QObject::connect(sync_timer_, &QTimer::timeout, [this]() {
-      if (!initial_sync_done_) {
-        syncFromTarget();
-      }
+        if (!initial_sync_done_) {
+          syncFromTarget();
+        }
     });
     sync_timer_->start(500);
   }
@@ -429,7 +446,8 @@ private:
     const auto name = parameter.get_name();
     parameter_client_->set_parameters(
       {parameter},
-      [this, name](std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future) {
+      [this,
+      name](std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future) {
         try {
           const auto results = future.get();
           if (!results.empty() && !results.front().successful) {
@@ -447,7 +465,9 @@ private:
 
   void registerParameter(const std::string & name)
   {
-    if (std::find(parameter_names_.begin(), parameter_names_.end(), name) == parameter_names_.end()) {
+    if (std::find(parameter_names_.begin(), parameter_names_.end(),
+      name) == parameter_names_.end())
+    {
       parameter_names_.push_back(name);
     }
   }
