@@ -48,8 +48,8 @@ Project environment to keep matched:
   - revision: `beta-384-g86e9aeb` (`86e9aeb`)
 - `px4_msgs`: `~/ws_sensor_combined/src/px4_msgs`
   - remote: `https://github.com/PX4/px4_msgs.git`
-  - branch: `main`
-  - revision: `ff7ae28`
+  - tag: `v1.17.0`
+  - revision: `86d8239`
 
 Keep `px4_msgs` and `px4_ros_com` aligned with the PX4 firmware version used in
 SITL. If PX4 is updated, record the new PX4 tag and the matching message
@@ -59,17 +59,21 @@ This controller derives PX4 versioned output topic names from
 `px4_msgs::msg::<Message>::MESSAGE_VERSION`, for example
 `/fmu/out/vehicle_local_position_v1`. Keep the ROS 2 `px4_msgs` package matched
 to the PX4-Autopilot checkout used for SITL. If you switch PX4 branches or tags,
-sync the message definitions from that PX4 checkout and rebuild:
+checkout the matching `px4_msgs` tag or release branch first:
 
 ```bash
 cd ~/ws_sensor_combined
-cp -a ~/PX4-Autopilot/msg/*.msg src/px4_msgs/msg/
-cp -a ~/PX4-Autopilot/msg/versioned/*.msg src/px4_msgs/msg/
-cp -a ~/PX4-Autopilot/srv/*.srv src/px4_msgs/srv/
-source /opt/ros/jazzy/setup.bash
-colcon build --packages-up-to geometric_controller
-source install/setup.bash
+git -C src/px4_msgs fetch --tags origin
+git -C src/px4_msgs checkout v1.17.0
 ```
+
+Then rebuild the workspace using the Build section below.
+
+For development against an unreleased PX4 commit, use the corresponding
+`px4_msgs` commit or `origin/release/<version>` branch. PX4 also provides
+`Tools/copy_to_ros_ws.sh` as a fallback for generating a local ROS workspace
+from a PX4 checkout, but the normal project workflow should keep `px4_msgs`
+version-controlled instead of hand-copying message files.
 
 If PX4 and ROS 2 must intentionally use different message versions, use the PX4
 ROS 2 message translation node instead.
@@ -98,7 +102,7 @@ run an older installed node while editing the newer source.
 After building, this launch starts PX4 SITL, Micro XRCE-DDS Agent, the
 controller, RViz, and the tuning panel from one ROS 2 launch process.
 
-Open QGroundControl and wait until it connects to PX4 before starting this
+Open QGroundControl (QGC) and wait until it connects to PX4 before starting this
 launch. This follows the PX4 ROS 2 Offboard example; with the default PX4 SITL
 arming checks, PX4 will not arm without a QGroundControl datalink or RC
 connection.
@@ -112,6 +116,10 @@ ros2 launch geometric_controller sitl_geometric_controller.launch.py
 
 The controller waits until PX4 `VehicleLocalPosition` is valid, then logs
 `Ready to request takeoff` before it requests Offboard mode and Arm.
+
+If the Gazebo GUI window does not appear, first try headless mode and check for
+`Gazebo world is ready` and `Spawning Gazebo model` in the PX4 log. Those lines
+mean the simulator is running even without the GUI window.
 
 Headless Gazebo example:
 
@@ -178,8 +186,8 @@ ros2 launch geometric_controller geometric_controller.launch.py
 This starts:
 
 - `trajectory_offboard_node`
-- RViz2, showing `/reference/trajectory`, `/reference/current_pose`, and
-  `/vehicle/current_pose`
+- RViz2, showing the complete reference path, moving reference frame, moving
+  vehicle pose, and the vehicle's recent flight trail
 - `trajectory_control_panel`, a small C++/Qt panel for the common trajectory
   parameters
 
@@ -252,8 +260,17 @@ it reaches the start tolerance.
 
 ## RViz and Parameter Panel
 
-RViz is for visualization only. It shows the generated reference path, the green
-current reference axes, and the red vehicle axes.
+RViz is for visualization only. It shows:
+
+- `/reference/trajectory`: the complete orange reference path
+- `/reference/current_pose`: the moving reference coordinate frame (`Current Reference`)
+- `/vehicle/current_pose`: the red vehicle pose
+- `/vehicle/path`: the recent green flight trail, limited by
+  `visualization.vehicle_path_max_points`
+
+The moving reference waits at the trajectory start while Offboard/Arm or valid
+PX4 local-position feedback is missing. For an animated reference-only preview
+without PX4, set `offboard.enabled: false`.
 
 The tuning panel is `trajectory_control_panel`. It is a C++/Qt executable in
 this package, not a Python node and not `rqt_reconfigure`. ROS 2 parameters do

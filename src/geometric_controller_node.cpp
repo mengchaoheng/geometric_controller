@@ -344,10 +344,13 @@ private:
     declare_parameter<std::string>("visualization.path_topic", "reference/trajectory");
     declare_parameter<std::string>("visualization.current_pose_topic", "reference/current_pose");
     declare_parameter<std::string>("visualization.vehicle_pose_topic", "vehicle/current_pose");
+    declare_parameter<std::string>("visualization.vehicle_path_topic", "vehicle/path");
     declare_parameter<std::string>("visualization.frame_id", "map");
     declare_parameter<bool>("visualization.ned_to_enu", true);
     declare_parameter<int>("visualization.preview_points", 240);
     declare_parameter<double>("visualization.path_publish_period_s", 0.5);
+    declare_parameter<int>("visualization.vehicle_path_max_points", 600);
+    declare_parameter<double>("visualization.vehicle_path_min_distance_m", 0.05);
 
     declare_parameter<std::string>(
       "trajName", "figure8_horizontal",
@@ -498,6 +501,8 @@ private:
     visualization_pose_topic_ = get_parameter("visualization.current_pose_topic").as_string();
     visualization_vehicle_pose_topic_ =
       get_parameter("visualization.vehicle_pose_topic").as_string();
+    visualization_vehicle_path_topic_ =
+      get_parameter("visualization.vehicle_path_topic").as_string();
     visualization_frame_id_ = get_parameter("visualization.frame_id").as_string();
     visualization_ned_to_enu_ = get_parameter("visualization.ned_to_enu").as_bool();
     preview_points_ =
@@ -505,6 +510,12 @@ private:
       get_parameter("visualization.preview_points").as_int()));
     path_publish_period_s_ =
       std::max(0.05, get_parameter("visualization.path_publish_period_s").as_double());
+    vehicle_path_max_points_ =
+      static_cast<int>(std::max<int64_t>(0,
+      get_parameter("visualization.vehicle_path_max_points").as_int()));
+    vehicle_path_min_distance_m_ =
+      std::max(0.0, get_parameter("visualization.vehicle_path_min_distance_m").as_double());
+    trimVehiclePath();
 
     const auto traj_name_from_param =
       geometric_controller::normalizeTrajectoryType(get_parameter("trajName").as_string());
@@ -596,12 +607,17 @@ private:
         std::bind(&TrajectoryOffboardNode::vehicleOdometryCallback, this, std::placeholders::_1));
     }
 
-    reference_path_publisher_ = create_publisher<nav_msgs::msg::Path>(visualization_path_topic_,
-      10);
+    auto reference_path_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+    reference_path_qos.reliable();
+    reference_path_qos.transient_local();
+    reference_path_publisher_ =
+      create_publisher<nav_msgs::msg::Path>(visualization_path_topic_, reference_path_qos);
     reference_pose_publisher_ =
       create_publisher<geometry_msgs::msg::PoseStamped>(visualization_pose_topic_, 10);
     vehicle_pose_publisher_ =
       create_publisher<geometry_msgs::msg::PoseStamped>(visualization_vehicle_pose_topic_, 10);
+    vehicle_path_publisher_ =
+      create_publisher<nav_msgs::msg::Path>(visualization_vehicle_path_topic_, 10);
   }
 
   void configureTimers()
@@ -790,6 +806,9 @@ private:
     const std::string previous_path_topic = visualization_path_topic_;
     const std::string previous_pose_topic = visualization_pose_topic_;
     const std::string previous_vehicle_pose_topic = visualization_vehicle_pose_topic_;
+    const std::string previous_vehicle_path_topic = visualization_vehicle_path_topic_;
+    const std::string previous_frame_id = visualization_frame_id_;
+    const bool previous_ned_to_enu = visualization_ned_to_enu_;
     const bool preserve_phase =
       !trajectory_reset_pending_ && (trajectory_started_ || !takeoff_before_trajectory_);
     const double elapsed_time_s = std::max(0.0, (now() - start_time_).seconds());
@@ -825,10 +844,16 @@ private:
       previous_odometry_topic != vehicle_odometry_topic_ ||
       previous_path_topic != visualization_path_topic_ ||
       previous_pose_topic != visualization_pose_topic_ ||
-      previous_vehicle_pose_topic != visualization_vehicle_pose_topic_;
+      previous_vehicle_pose_topic != visualization_vehicle_pose_topic_ ||
+      previous_vehicle_path_topic != visualization_vehicle_path_topic_;
 
     if (topics_changed) {
       configureRosInterfaces();
+    }
+    if (previous_frame_id != visualization_frame_id_ ||
+      previous_ned_to_enu != visualization_ned_to_enu_)
+    {
+      vehicle_path_.clear();
     }
     if (std::abs(previous_setpoint_rate - setpoint_rate_hz_) > 1e-6) {
       configureSetpointTimer();
@@ -969,7 +994,9 @@ private:
 
   geometric_controller::TrajectorySample currentReference(const rclcpp::Time & stamp)
   {
-    if (!takeoff_before_trajectory_) {
+    // Visualization-only mode must animate without PX4 feedback. Otherwise the
+    // takeoff gate would keep the reference pose at the first sample forever.
+    if (!offboard_enabled_ || !takeoff_before_trajectory_) {
       const double t = (stamp - start_time_).seconds();
       return reference_trajectory_.sample(t);
     }
@@ -1286,6 +1313,7 @@ private:
       path.poses.push_back(toPoseStamped(sample, stamp));
     }
     reference_path_publisher_->publish(path);
+    publishVehiclePath(stamp);
   }
 
   void publishCurrentPose(
@@ -1324,6 +1352,55 @@ private:
     pose.pose.orientation.y = orientation.y;
     pose.pose.orientation.z = orientation.z;
     vehicle_pose_publisher_->publish(pose);
+    appendVehiclePathPose(pose);
+  }
+
+  void appendVehiclePathPose(const geometry_msgs::msg::PoseStamped & pose)
+  {
+    if (vehicle_path_max_points_ <= 0) {
+      vehicle_path_.clear();
+      return;
+    }
+
+    if (!vehicle_path_.empty()) {
+      const auto & last = vehicle_path_.back().pose.position;
+      const auto & current = pose.pose.position;
+      const double dx = current.x - last.x;
+      const double dy = current.y - last.y;
+      const double dz = current.z - last.z;
+      const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (distance < vehicle_path_min_distance_m_) {
+        return;
+      }
+    }
+
+    vehicle_path_.push_back(pose);
+    trimVehiclePath();
+  }
+
+  void trimVehiclePath()
+  {
+    if (vehicle_path_max_points_ <= 0) {
+      vehicle_path_.clear();
+      return;
+    }
+    const auto max_points = static_cast<size_t>(vehicle_path_max_points_);
+    if (vehicle_path_.size() > max_points) {
+      vehicle_path_.erase(vehicle_path_.begin(), vehicle_path_.end() - max_points);
+    }
+  }
+
+  void publishVehiclePath(const rclcpp::Time & stamp)
+  {
+    if (!vehicle_path_publisher_ || vehicle_path_.empty()) {
+      return;
+    }
+
+    nav_msgs::msg::Path path;
+    path.header.stamp = stamp;
+    path.header.frame_id = visualization_frame_id_;
+    path.poses = vehicle_path_;
+    vehicle_path_publisher_->publish(path);
   }
 
   geometry_msgs::msg::PoseStamped toPoseStamped(
@@ -1451,10 +1528,13 @@ private:
   std::string visualization_path_topic_;
   std::string visualization_pose_topic_;
   std::string visualization_vehicle_pose_topic_;
+  std::string visualization_vehicle_path_topic_;
   std::string visualization_frame_id_{"map"};
   bool visualization_ned_to_enu_{true};
   int preview_points_{240};
   double path_publish_period_s_{0.5};
+  int vehicle_path_max_points_{600};
+  double vehicle_path_min_distance_m_{0.05};
   double path_publish_time_s_{-std::numeric_limits<double>::infinity()};
 
   uint8_t target_system_{1};
@@ -1471,6 +1551,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr reference_path_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr reference_pose_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr vehicle_pose_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr vehicle_path_publisher_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
     vehicle_local_position_subscriber_;
@@ -1480,6 +1561,7 @@ private:
   px4_msgs::msg::VehicleStatus vehicle_status_{};
   px4_msgs::msg::VehicleLocalPosition vehicle_local_position_{};
   px4_msgs::msg::VehicleOdometry vehicle_odometry_{};
+  std::vector<geometry_msgs::msg::PoseStamped> vehicle_path_;
   bool status_received_{false};
   bool local_position_received_{false};
   bool vehicle_odometry_received_{false};

@@ -37,10 +37,13 @@ trajectory_offboard_node:
       path_topic: reference/trajectory
       current_pose_topic: reference/current_pose
       vehicle_pose_topic: vehicle/current_pose
+      vehicle_path_topic: vehicle/path
       frame_id: map
       ned_to_enu: true
       preview_points: 240
-      path_publish_period_s: 0.5
+      path_publish_period_s: 0.02
+      vehicle_path_max_points: 30
+      vehicle_path_min_distance_m: 0.05
 
     trajName: figure8_horizontal
     trajectory_type: 1
