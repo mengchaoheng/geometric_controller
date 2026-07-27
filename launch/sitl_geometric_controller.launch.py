@@ -90,7 +90,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'px4_model',
-            default_value='gz_x500',
+            default_value='gz_iris',
             description='PX4 SITL make target model.',
         ),
         DeclareLaunchArgument(
