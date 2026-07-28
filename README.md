@@ -29,8 +29,8 @@ pair. Do not select unrelated versions based only on repository names.
 | Operating system | Ubuntu 24.04.4 LTS | Ubuntu 24.04 recommended |
 | ROS 2 | Jazzy | Currently supported and tested ROS 2 distribution |
 | C++ | C++17 | The compiler must support C++17 |
-| PX4 firmware | `mengchaoheng/DuctedFanUAV-Autopilot:df-main`, commit `1010e3fcb037bb552cd809be34c36e97cf94c18d` | Must contain the Iris, Offboard wrench, and DDS configuration described below |
-| `px4_msgs` | `v1.17.0` baseline, commit `86d8239e962f6939e05c3737784f60c02fa884db`, synchronized with the `df-main` message definitions | Every field must match the PX4 `msg/` tree used to build the firmware |
+| PX4 firmware | PX4 v1.18.0-based `mengchaoheng/DuctedFanUAV-Autopilot:df-main`, commit `912d45ca037221676992c208d0dce48f99eb04f0` | Must contain the Iris, Offboard wrench, and DDS configuration described below |
+| `px4_msgs` | Official `release/1.18`, commit `598c7aad7b2386f9406ebd2a2f841619fddc3c78` | Do not add controller-specific fields; every serialized field must match the PX4 v1.18.0 `msg/` tree |
 | `px4_ros_com` | `main`, commit `86e9aeb20e55a4673fa8a9f1c29ea06a6c5ad1af` | Reference and ROS 2 Offboard example only; not a direct build dependency |
 | Micro XRCE-DDS Agent | A version compatible with the PX4 `uxrce_dds_client` above | Must run for SITL or hardware DDS communication |
 | Eigen | 3.4.0 validated | ROS dependencies: `eigen` and `eigen3_cmake_module` |
@@ -83,13 +83,13 @@ cd /path/to/DuctedFanUAV-Autopilot
 DONT_RUN=1 make px4_sitl gz_iris
 ```
 
-The current `px4_msgs` tree also synchronizes `VehicleControlMode`,
-`VehicleStatus`, and `VehicleTorqueSetpoint` with `df-main`. The
-`VehicleTorqueSetpoint.xyz_indi_feedback` field exists only to preserve the DDS
-wire type; this controller does not consume it. If the PX4 and ROS message
-definitions differ, topics may fail to match, fields may be misaligned, or
-Offboard mode detection may fail. Rebuilding this package alone cannot correct
-that condition: synchronize `px4_msgs` first.
+Use the official `px4_msgs release/1.18` tree without controller-specific
+message changes. In commit `912d45ca`, `df-main` removed the former PCA/INDI
+split fields from `VehicleTorqueSetpoint`; the PX4 and official ROS message
+therefore both contain only `timestamp`, `timestamp_sample`, and `xyz`.
+If the PX4 and ROS message definitions differ, topics may fail to match, fields
+may be misaligned, or Offboard mode detection may fail. Rebuilding this package
+alone cannot correct that condition: synchronize `px4_msgs` first.
 
 Direct ROS dependencies are recorded in `package.xml`: `rclcpp`, `px4_msgs`,
 `geometry_msgs`, `nav_msgs`, `rcl_interfaces`, Eigen, Qt5, RViz2, and ROS 2
@@ -189,9 +189,9 @@ filtering does not replace controller algorithm state.
 Rotational acceleration `α_0` directly uses
 `VehicleAngularVelocity.xyz_derivative`. PX4 has already differentiated this
 field and applied the `IMU_DGYRO_CUTOFF` second-order low-pass, so the ROS side
-does not filter it again and add phase delay. Extra fields in the `df-main`
-`VehicleTorqueSetpoint` are present only for DDS layout compatibility; this
-node sends zeros with `xyz_indi_feedback_valid=false`.
+does not filter it again and add phase delay. INDI state remains entirely
+inside the ROS controller; `VehicleTorqueSetpoint` carries only the final
+normalized moment in `xyz`.
 
 ## Vehicle parameter file
 
@@ -215,11 +215,9 @@ the default launch target and default vehicle configuration use the `df-main`
 
 ## Build and test
 
-The recorded environment is Ubuntu 24.04 and ROS 2 Jazzy. The workspace
-`px4_msgs` uses `v1.17.0` as its baseline, with `VehicleStatus` and
-`VehicleTorqueSetpoint` layouts synchronized to the local
-`DuctedFanUAV-Autopilot/df-main`. `px4_msgs` must match the PX4 firmware message
-version.
+The recorded environment is Ubuntu 24.04, ROS 2 Jazzy, PX4 v1.18.0, and the
+official `px4_msgs release/1.18`. `px4_msgs` must match the PX4 firmware message
+version; this project does not require custom PX4 message fields.
 
 ```bash
 cd ~/ws_sensor_combined

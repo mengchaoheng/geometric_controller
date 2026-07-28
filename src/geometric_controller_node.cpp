@@ -1843,8 +1843,6 @@ private:
       static_cast<float>(normalized.torque.x()),
       static_cast<float>(normalized.torque.y()),
       static_cast<float>(normalized.torque.z())};
-    torque_message.xyz_indi_feedback = {0.0F, 0.0F, 0.0F};
-    torque_message.xyz_indi_feedback_valid = false;
     torque_message.timestamp = timestamp;
     torque_message.timestamp_sample = feedback_timestamp_sample;
     vehicle_torque_setpoint_publisher_->publish(torque_message);

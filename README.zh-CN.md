@@ -26,8 +26,8 @@
 | 操作系统 | Ubuntu 24.04.4 LTS | 推荐 Ubuntu 24.04 |
 | ROS 2 | Jazzy | 当前正式支持和测试的 ROS 2 发行版 |
 | C++ | C++17 | 编译器必须支持 C++17 |
-| PX4 固件 | `mengchaoheng/DuctedFanUAV-Autopilot:df-main`，提交 `1010e3fcb037bb552cd809be34c36e97cf94c18d` | 必须包含下述 Iris、Offboard wrench 和 DDS 配置 |
-| `px4_msgs` | `v1.17.0` 基线，提交 `86d8239e962f6939e05c3737784f60c02fa884db`，并与上述 `df-main` 消息定义同步 | 消息字段必须逐项匹配用于编译 PX4 的 `msg/` |
+| PX4 固件 | 基于 PX4 v1.18.0 的 `mengchaoheng/DuctedFanUAV-Autopilot:df-main`，提交 `912d45ca037221676992c208d0dce48f99eb04f0` | 必须包含下述 Iris、Offboard wrench 和 DDS 配置 |
+| `px4_msgs` | 官方 `release/1.18`，提交 `598c7aad7b2386f9406ebd2a2f841619fddc3c78` | 不增加控制器专用字段；所有序列化字段必须匹配 PX4 v1.18.0 的 `msg/` |
 | `px4_ros_com` | `main`，提交 `86e9aeb20e55a4673fa8a9f1c29ea06a6c5ad1af` | 仅作为 ROS 2 Offboard 示例和参考，不是本包的直接编译依赖 |
 | Micro XRCE-DDS Agent | 与上述 PX4 `uxrce_dds_client` 兼容的版本 | 运行 SITL/真机 DDS 通信时必须启动 |
 | Eigen | 3.4.0（已验证） | ROS 依赖：`eigen`、`eigen3_cmake_module` |
@@ -80,12 +80,12 @@ cd /path/to/DuctedFanUAV-Autopilot
 DONT_RUN=1 make px4_sitl gz_iris
 ```
 
-当前 `px4_msgs` 还同步了 `df-main` 的 `VehicleControlMode`、
-`VehicleStatus` 和 `VehicleTorqueSetpoint`。其中
-`VehicleTorqueSetpoint.xyz_indi_feedback` 字段仅用于保持 DDS wire type
-兼容，本控制器不会读取该字段。若 PX4 与 ROS 侧消息定义不一致，可能出现
-topic 无法匹配、字段错位或 Offboard 模式判断错误；这种情况下不能通过仅重编译
-本包解决，必须先重新同步 `px4_msgs`。
+直接使用未经控制器专用修改的官方 `px4_msgs release/1.18`。PX4 提交
+`912d45ca` 已从 `VehicleTorqueSetpoint` 删除原有 PCA/INDI 拆分字段，因此
+PX4 与官方 ROS 消息都只包含 `timestamp`、`timestamp_sample` 和 `xyz`。
+若 PX4 与 ROS 侧消息
+定义不一致，可能出现 topic 无法匹配、字段错位或 Offboard 模式判断错误；
+这种情况下不能通过仅重编译本包解决，必须先重新同步 `px4_msgs`。
 
 本包的直接 ROS 依赖记录在 `package.xml`，包括 `rclcpp`、`px4_msgs`、
 `geometry_msgs`、`nav_msgs`、`rcl_interfaces`、Eigen、Qt5、RViz2 和 ROS 2
@@ -172,8 +172,8 @@ F_c = F_0 + mass * (a_c - a_0)
 转动加速度 `α_0` 直接使用
 `VehicleAngularVelocity.xyz_derivative`：该字段已在 PX4 中完成微分并由
 `IMU_DGYRO_CUTOFF` 二阶低通，ROS 侧不再重复滤波，以免增加相位延迟。
-`df-main` 的 `VehicleTorqueSetpoint` 额外字段仅用于保持 DDS
-消息布局一致，本节点固定发送零值并令 `xyz_indi_feedback_valid=false`。
+INDI 状态完全保留在 ROS 控制器内部；`VehicleTorqueSetpoint` 只通过 `xyz`
+发送最终归一化力矩。
 
 ## 车辆参数文件
 
@@ -194,10 +194,9 @@ ros2 launch geometric_controller geometric_controller.launch.py \
 
 ## 编译与测试
 
-当前记录环境为 Ubuntu 24.04、ROS 2 Jazzy。工作空间的 `px4_msgs` 以
-`v1.17.0` 为基线，并已将 `VehicleStatus` 和 `VehicleTorqueSetpoint` 的消息
-布局同步到本机 `DuctedFanUAV-Autopilot/df-main`。`px4_msgs` 必须和 PX4 固件
-消息版本匹配。
+当前记录环境为 Ubuntu 24.04、ROS 2 Jazzy、PX4 v1.18.0 和官方
+`px4_msgs release/1.18`。`px4_msgs` 必须和 PX4 固件消息版本匹配；本项目
+不要求任何自定义 PX4 消息字段。
 
 ```bash
 cd ~/ws_sensor_combined
