@@ -35,37 +35,37 @@ struct TrajectoryParameters
   double phase_shift{0.0};
   double path_preview_cycles{10.0};
 
-  double figure8_horizontal_Ax{2.0};
-  double figure8_horizontal_Ay{2.0};
-  double figure8_horizontal_Hc{3.0};
+  double figure8_horizontal_Ax{3.0};
+  double figure8_horizontal_Ay{3.0};
+  double figure8_horizontal_Hc{6.0};
   double figure8_horizontal_theta0{0.0};
 
-  double figure8_vertical_Ay{2.0};
-  double figure8_vertical_Az{2.0};
-  double figure8_vertical_Hc{3.0};
+  double figure8_vertical_Ay{3.0};
+  double figure8_vertical_Az{3.0};
+  double figure8_vertical_Hc{6.0};
   double figure8_vertical_theta0{-0.7853981633974483};
 
-  double helix_flip_Ay{2.0};
-  double helix_flip_Az{2.0};
-  double helix_flip_Hc{3.0};
+  double helix_flip_Ay{3.0};
+  double helix_flip_Az{3.0};
+  double helix_flip_Hc{6.0};
   double helix_flip_Vx{0.30};
   double helix_flip_theta0{0.0};
 
-  double helix_flip_y_Ax{2.0};
-  double helix_flip_y_Az{2.0};
-  double helix_flip_y_Hc{3.0};
+  double helix_flip_y_Ax{3.0};
+  double helix_flip_y_Az{3.0};
+  double helix_flip_y_Hc{6.0};
   double helix_flip_y_Vy{0.30};
   double helix_flip_y_theta0{0.0};
 
-  double flip_loop_sine_Ay{2.0};
-  double flip_loop_sine_Az{2.0};
-  double flip_loop_sine_Hc{3.0};
+  double flip_loop_sine_Ay{3.0};
+  double flip_loop_sine_Az{3.0};
+  double flip_loop_sine_Hc{6.0};
   double flip_loop_sine_Vx{0.0};
   double flip_loop_sine_theta0{0.0};
 
   double fast_circle_Ax{3.0};
   double fast_circle_Ay{3.0};
-  double fast_circle_Hc{3.0};
+  double fast_circle_Hc{6.0};
   double fast_circle_theta0{0.0};
 };
 

@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # DuctedFanUAV-Autopilot df-main Iris and main.m values.
+    mass: 0.75
+    inertia_x: 0.0025
+    inertia_y: 0.0021
+    inertia_z: 0.0043
+    normalizedthrust_constant: 0.022058823529
+    normalizedthrust_offset: 0.0
+    # PX4 D_torque from the physical, asymmetric Iris effectiveness matrix.
+    normalizedtorque_constant_r: 0.319957823650
+    normalizedtorque_constant_p: 0.319957823650
+    normalizedtorque_constant_y: 1.962568474088

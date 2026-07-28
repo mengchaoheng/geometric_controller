@@ -7,7 +7,7 @@ trajectory_offboard_node:
       auto_start: true
       arm_on_start: true
       prearm_setpoints: 10
-      setpoint_rate_hz: 100.0
+      setpoint_rate_hz: 250.0
       heartbeat_rate_hz: 5.0
       publish_rate_hz: 0.0
       auto_start_retry_period_s: 1.0
@@ -17,17 +17,67 @@ trajectory_offboard_node:
       takeoff_position_tolerance: 0.25
       takeoff_velocity_tolerance: 0.5
 
+    # gz_iris uORB runtime rates are about 125 Hz for full EKF/local position,
+    # about 200-250 Hz for attitude, and 250 Hz for angular velocity.
+    outer_loop_rate_hz: 125.0
+    inner_loop_rate_hz: 250.0
+
     setpoint:
       level: position
       velocity_feedforward: true
       acceleration_feedforward: true
-      yaw_rate_feedforward: true
+
+    # 8 keeps the existing PX4 position-controller path. Types 0-7 run the
+    # complete force/moment controller in ROS 2 and bypass PX4 attitude/rate control.
+    controller_type: 8
+    ctrl_mode: 1
+    gravity: 9.81
+    mass: 0.75
+    inertia_x: 0.0025
+    inertia_y: 0.0021
+    inertia_z: 0.0043
+    indi_filter_cutoff_hz: 30.0
+    # Match df-main mc_pos_control: MPC_VEL_LP=0, MPC_VEL_NF_FRQ=0,
+    # MPC_VEL_NF_BW=5 and MPC_VELD_LP=5.
+    indi_velocity_lpf_hz: 0.0
+    indi_velocity_notch_hz: 0.0
+    indi_velocity_notch_bandwidth_hz: 5.0
+    indi_velocity_derivative_lpf_hz: 5.0
+    drag_dx: 0.0
+    drag_dy: 0.0
+    drag_dz: 0.0
+    max_acc: 45.0
+    Kp_x: 10.0
+    Kp_y: 10.0
+    Kp_z: 10.0
+    Kv_x: 6.0
+    Kv_y: 6.0
+    Kv_z: 6.0
+    KR_r: 150.0
+    KR_p: 150.0
+    KR_y: 80.0
+    KOmega_r: 50.0
+    KOmega_p: 50.0
+    KOmega_y: 3.0
+
+    # Same convention as mavros_controllers:
+    # normalizedthrust_constant = mass / total_max_thrust.
+    normalizedthrust_constant: 0.022058823529
+    normalizedthrust_offset: 0.0
+    normalizedtorque_constant_r: 0.319957823650
+    normalizedtorque_constant_p: 0.319957823650
+    normalizedtorque_constant_y: 1.962568474088
 
     px4:
       offboard_control_mode_topic: /fmu/in/offboard_control_mode
       trajectory_setpoint_topic: /fmu/in/trajectory_setpoint
+      vehicle_thrust_setpoint_topic: /fmu/in/vehicle_thrust_setpoint
+      vehicle_torque_setpoint_topic: /fmu/in/vehicle_torque_setpoint
       vehicle_command_topic: /fmu/in/vehicle_command
       vehicle_odometry_topic: /fmu/out/vehicle_odometry
+      vehicle_attitude_topic: /fmu/out/vehicle_attitude
+      vehicle_angular_velocity_topic: /fmu/out/vehicle_angular_velocity
+      vehicle_control_mode_topic: /fmu/out/vehicle_control_mode
       target_system: 1
       target_component: 1
       source_system: 1
@@ -54,35 +104,35 @@ trajectory_offboard_node:
     origin_x: 0.0
     origin_y: 0.0
 
-    figure8_horizontal_Ax: 2.0
-    figure8_horizontal_Ay: 2.0
-    figure8_horizontal_Hc: 3.0
+    figure8_horizontal_Ax: 3.0
+    figure8_horizontal_Ay: 3.0
+    figure8_horizontal_Hc: 6.0
     figure8_horizontal_theta0: 0.0
 
-    figure8_vertical_Ay: 2.0
-    figure8_vertical_Az: 2.0
-    figure8_vertical_Hc: 3.0
+    figure8_vertical_Ay: 3.0
+    figure8_vertical_Az: 3.0
+    figure8_vertical_Hc: 6.0
     figure8_vertical_theta0: -0.7853981633974483
 
-    helix_flip_Ay: 2.0
-    helix_flip_Az: 2.0
-    helix_flip_Hc: 3.0
+    helix_flip_Ay: 3.0
+    helix_flip_Az: 3.0
+    helix_flip_Hc: 6.0
     helix_flip_Vx: 0.30
     helix_flip_theta0: 0.0
 
-    helix_flip_y_Ax: 2.0
-    helix_flip_y_Az: 2.0
-    helix_flip_y_Hc: 3.0
+    helix_flip_y_Ax: 3.0
+    helix_flip_y_Az: 3.0
+    helix_flip_y_Hc: 6.0
     helix_flip_y_Vy: 0.30
     helix_flip_y_theta0: 0.0
 
-    flip_loop_sine_Ay: 2.0
-    flip_loop_sine_Az: 2.0
-    flip_loop_sine_Hc: 3.0
+    flip_loop_sine_Ay: 3.0
+    flip_loop_sine_Az: 3.0
+    flip_loop_sine_Hc: 6.0
     flip_loop_sine_Vx: 0.0
     flip_loop_sine_theta0: 0.0
 
     fast_circle_Ax: 3.0
     fast_circle_Ay: 3.0
-    fast_circle_Hc: 3.0
+    fast_circle_Hc: 6.0
     fast_circle_theta0: 0.0

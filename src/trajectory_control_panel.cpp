@@ -21,9 +21,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -40,6 +42,7 @@
 #include <rclcpp/parameter_client.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "geometric_controller/controllers/controller_factory.hpp"
 #include "geometric_controller/reference_trajectory.hpp"
 
 namespace
@@ -82,33 +85,42 @@ private:
   void buildUi()
   {
     window_ = std::make_unique<QWidget>();
-    window_->setWindowTitle("geometric_controller trajectory panel");
-    window_->resize(520, 640);
+    window_->setWindowTitle("geometric_controller control panel");
+    window_->resize(600, 720);
 
     auto * main_layout = new QVBoxLayout(window_.get());
     main_layout->setContentsMargins(12, 12, 12, 12);
     main_layout->setSpacing(10);
+
+    auto * tabs = new QTabWidget();
+    main_layout->addWidget(tabs, 1);
+
+    auto * reference_page = new QWidget();
+    auto * reference_layout = new QVBoxLayout(reference_page);
+    reference_layout->setContentsMargins(8, 8, 8, 8);
+    reference_layout->setSpacing(10);
+    tabs->addTab(reference_page, "Reference");
 
     auto * reference_group = new QGroupBox("Reference");
     auto * reference_form = new QFormLayout(reference_group);
     reference_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     addOmegaControl(reference_form);
     addTrajectoryCombo(reference_form);
-    main_layout->addWidget(reference_group);
+    reference_layout->addWidget(reference_group);
 
     auto * shape_group = new QGroupBox("Shape");
     auto * shape_layout = new QVBoxLayout(shape_group);
     shape_stack_ = new QStackedWidget();
     shape_layout->addWidget(shape_stack_);
     addShapePages();
-    main_layout->addWidget(shape_group, 1);
+    reference_layout->addWidget(shape_group, 1);
 
     auto * yaw_group = new QGroupBox("Yaw");
     auto * yaw_form = new QFormLayout(yaw_group);
     addBool(yaw_form, "trajectory_yaw_lock", "trajectory_yaw_lock", false);
     addDouble(yaw_form, "trajectory_yaw_fixed", "trajectory_yaw_fixed", 0.0, -3.1416, 3.1416, 0.01,
       3, " rad");
-    main_layout->addWidget(yaw_group);
+    reference_layout->addWidget(yaw_group);
 
     auto * start_group = new QGroupBox("Start");
     auto * start_form = new QFormLayout(start_group);
@@ -121,7 +133,90 @@ private:
     addDouble(
       start_form, "velocity_tolerance", "offboard.takeoff_velocity_tolerance", 0.5, 0.02,
       3.0, 0.01, 2, " m/s");
-    main_layout->addWidget(start_group);
+    reference_layout->addWidget(start_group);
+
+    auto * controller_scroll = new QScrollArea();
+    controller_scroll->setWidgetResizable(true);
+    auto * controller_page = new QWidget();
+    controller_scroll->setWidget(controller_page);
+    auto * controller_layout = new QVBoxLayout(controller_page);
+    controller_layout->setContentsMargins(8, 8, 8, 8);
+    controller_layout->setSpacing(10);
+    tabs->addTab(controller_scroll, "Controller");
+
+    auto * controller_group = new QGroupBox("ROS 2 / PX4 controller");
+    auto * controller_form = new QFormLayout(controller_group);
+    controller_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    addControllerCombo(controller_form);
+    addCtrlModeCombo(controller_form);
+    addDouble(
+      controller_form, "outer loop rate", "outer_loop_rate_hz", 125.0, 10.0, 250.0,
+      1.0, 1, " Hz");
+    addDouble(
+      controller_form, "inner loop rate", "inner_loop_rate_hz", 250.0, 50.0, 250.0,
+      1.0, 1, " Hz");
+    addDouble(controller_form, "Kp x", "Kp_x", 10.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "Kp y", "Kp_y", 10.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "Kp z", "Kp_z", 10.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "Kv x", "Kv_x", 6.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "Kv y", "Kv_y", 6.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "Kv z", "Kv_z", 6.0, 0.0, 40.0, 0.1, 2, "");
+    addDouble(controller_form, "KR roll", "KR_r", 150.0, 0.0, 500.0, 1.0, 1, "");
+    addDouble(controller_form, "KR pitch", "KR_p", 150.0, 0.0, 500.0, 1.0, 1, "");
+    addDouble(controller_form, "KR yaw", "KR_y", 80.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ roll", "KOmega_r", 50.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ pitch", "KOmega_p", 50.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ yaw", "KOmega_y", 3.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(
+      controller_form, "max feedback accel", "max_acc", 45.0, 1.0, 100.0, 0.1, 2,
+      " m/s²");
+    addDouble(controller_form, "mass", "mass", 0.75, 0.05, 50.0, 0.001, 3, " kg");
+    addDouble(
+      controller_form, "inertia x", "inertia_x", 0.0025, 0.00001, 10.0,
+      0.0001, 5, " kg·m²");
+    addDouble(
+      controller_form, "inertia y", "inertia_y", 0.0021, 0.00001, 10.0,
+      0.0001, 5, " kg·m²");
+    addDouble(
+      controller_form, "inertia z", "inertia_z", 0.0043, 0.00001, 10.0,
+      0.0001, 5, " kg·m²");
+    addDouble(
+      controller_form, "INDI cutoff", "indi_filter_cutoff_hz", 30.0, 0.0, 100.0,
+      1.0, 1, " Hz");
+    addDouble(
+      controller_form, "INDI velocity LPF", "indi_velocity_lpf_hz", 0.0, 0.0, 50.0,
+      0.5, 1, " Hz");
+    addDouble(
+      controller_form, "INDI velocity notch", "indi_velocity_notch_hz", 0.0, 0.0, 50.0,
+      0.5, 1, " Hz");
+    addDouble(
+      controller_form, "INDI notch bandwidth", "indi_velocity_notch_bandwidth_hz", 5.0, 0.0,
+      50.0, 0.5, 1, " Hz");
+    addDouble(
+      controller_form, "INDI velocity D LPF", "indi_velocity_derivative_lpf_hz", 5.0, 0.0,
+      50.0, 0.5, 1, " Hz");
+    controller_layout->addWidget(controller_group);
+
+    auto * normalization_group = new QGroupBox("PX4 normalization constants");
+    auto * normalization_form = new QFormLayout(normalization_group);
+    normalization_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    addDouble(
+      normalization_form, "thrust m/Tmax", "normalizedthrust_constant",
+      0.022058823529, 0.0, 1.0, 0.0001, 6, " kg/N");
+    addDouble(
+      normalization_form, "thrust offset", "normalizedthrust_offset",
+      0.0, -1.0, 1.0, 0.0001, 6, "");
+    addDouble(
+      normalization_form, "torque roll", "normalizedtorque_constant_r",
+      0.319957823650, 0.0, 1000.0, 0.001, 6, " 1/(N·m)");
+    addDouble(
+      normalization_form, "torque pitch", "normalizedtorque_constant_p",
+      0.319957823650, 0.0, 1000.0, 0.001, 6, " 1/(N·m)");
+    addDouble(
+      normalization_form, "torque yaw", "normalizedtorque_constant_y",
+      1.962568474088, 0.0, 1000.0, 0.001, 6, " 1/(N·m)");
+    controller_layout->addWidget(normalization_group);
+    controller_layout->addStretch(1);
 
     auto * bottom_layout = new QHBoxLayout();
     auto * refresh_button = new QPushButton("Refresh");
@@ -212,44 +307,83 @@ private:
       });
   }
 
+  void addControllerCombo(QFormLayout * form)
+  {
+    registerParameter("controller_type");
+
+    controller_combo_ = new QComboBox();
+    const auto & names = geometric_controller::supportedControllerTypes();
+    for (size_t id = 0; id < names.size(); ++id) {
+      controller_combo_->addItem(
+        QString::fromStdString(names[id]), static_cast<int>(id));
+    }
+    form->addRow("controller_type", controller_combo_);
+
+    QObject::connect(
+      controller_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+      [this](int index) {
+        if (index >= 0 && !updating_ui_) {
+          setIntegerParameter("controller_type", controller_combo_->itemData(index).toInt());
+        }
+      });
+  }
+
+  void addCtrlModeCombo(QFormLayout * form)
+  {
+    registerParameter("ctrl_mode");
+
+    ctrl_mode_combo_ = new QComboBox();
+    ctrl_mode_combo_->addItem("quaternion error", geometric_controller::kErrorQuaternion);
+    ctrl_mode_combo_->addItem("geometric error", geometric_controller::kErrorGeometric);
+    form->addRow("ctrl_mode", ctrl_mode_combo_);
+
+    QObject::connect(
+      ctrl_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+      [this](int index) {
+        if (index >= 0 && !updating_ui_) {
+          setIntegerParameter("ctrl_mode", ctrl_mode_combo_->itemData(index).toInt());
+        }
+      });
+  }
+
   void addShapePages()
   {
     auto * figure8_horizontal = addShapePage();
-    addDouble(figure8_horizontal, "Ax", "figure8_horizontal_Ax", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(figure8_horizontal, "Ay", "figure8_horizontal_Ay", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(figure8_horizontal, "Hc", "figure8_horizontal_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(figure8_horizontal, "Ax", "figure8_horizontal_Ax", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(figure8_horizontal, "Ay", "figure8_horizontal_Ay", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(figure8_horizontal, "Hc", "figure8_horizontal_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(
       figure8_horizontal, "theta0", "figure8_horizontal_theta0", 0.0, -3.1416, 3.1416,
       0.01, 3, " rad");
 
     auto * figure8_vertical = addShapePage();
-    addDouble(figure8_vertical, "Ay", "figure8_vertical_Ay", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(figure8_vertical, "Az", "figure8_vertical_Az", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(figure8_vertical, "Hc", "figure8_vertical_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(figure8_vertical, "Ay", "figure8_vertical_Ay", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(figure8_vertical, "Az", "figure8_vertical_Az", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(figure8_vertical, "Hc", "figure8_vertical_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(
       figure8_vertical, "theta0", "figure8_vertical_theta0", -0.7854, -3.1416, 3.1416,
       0.01, 3, " rad");
 
     auto * helix_flip = addShapePage();
-    addDouble(helix_flip, "Ay", "helix_flip_Ay", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(helix_flip, "Az", "helix_flip_Az", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(helix_flip, "Hc", "helix_flip_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip, "Ay", "helix_flip_Ay", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip, "Az", "helix_flip_Az", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip, "Hc", "helix_flip_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(helix_flip, "Vx", "helix_flip_Vx", 0.3, -5.0, 5.0, 0.1, 2, " m/s");
     addDouble(helix_flip, "theta0", "helix_flip_theta0", 0.0, -3.1416, 3.1416, 0.01, 3, " rad");
 
     auto * helix_flip_y = addShapePage();
-    addDouble(helix_flip_y, "Ax", "helix_flip_y_Ax", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(helix_flip_y, "Az", "helix_flip_y_Az", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(helix_flip_y, "Hc", "helix_flip_y_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip_y, "Ax", "helix_flip_y_Ax", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip_y, "Az", "helix_flip_y_Az", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(helix_flip_y, "Hc", "helix_flip_y_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(helix_flip_y, "Vy", "helix_flip_y_Vy", 0.3, -5.0, 5.0, 0.1, 2, " m/s");
     addDouble(
       helix_flip_y, "theta0", "helix_flip_y_theta0", 0.0, -3.1416, 3.1416, 0.01,
       3, " rad");
 
     auto * flip_loop_sine = addShapePage();
-    addDouble(flip_loop_sine, "Ay", "flip_loop_sine_Ay", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(flip_loop_sine, "Az", "flip_loop_sine_Az", 2.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(flip_loop_sine, "Hc", "flip_loop_sine_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(flip_loop_sine, "Ay", "flip_loop_sine_Ay", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(flip_loop_sine, "Az", "flip_loop_sine_Az", 3.0, 0.1, 10.0, 0.1, 2, " m");
+    addDouble(flip_loop_sine, "Hc", "flip_loop_sine_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(flip_loop_sine, "Vx", "flip_loop_sine_Vx", 0.0, -5.0, 5.0, 0.1, 2, " m/s");
     addDouble(
       flip_loop_sine, "theta0", "flip_loop_sine_theta0", 0.0, -3.1416, 3.1416,
@@ -258,7 +392,7 @@ private:
     auto * fast_circle = addShapePage();
     addDouble(fast_circle, "Ax", "fast_circle_Ax", 3.0, 0.1, 10.0, 0.1, 2, " m");
     addDouble(fast_circle, "Ay", "fast_circle_Ay", 3.0, 0.1, 10.0, 0.1, 2, " m");
-    addDouble(fast_circle, "Hc", "fast_circle_Hc", 3.0, 0.5, 10.0, 0.1, 2, " m");
+    addDouble(fast_circle, "Hc", "fast_circle_Hc", 6.0, 0.5, 10.0, 0.1, 2, " m");
     addDouble(fast_circle, "theta0", "fast_circle_theta0", 0.0, -3.1416, 3.1416, 0.01, 3, " rad");
   }
 
@@ -373,6 +507,18 @@ private:
         setTrajectoryTypeUi(static_cast<int>(parameter.as_int()));
         continue;
       }
+      if (name == "controller_type" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+      {
+        setControllerTypeUi(static_cast<int>(parameter.as_int()));
+        continue;
+      }
+      if (name == "ctrl_mode" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+      {
+        setCtrlModeUi(static_cast<int>(parameter.as_int()));
+        continue;
+      }
       if (name == "omega_value" &&
         parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
       {
@@ -410,6 +556,28 @@ private:
       trajectory_combo_->setCurrentIndex(index);
     }
     shape_stack_->setCurrentIndex(clamped - 1);
+  }
+
+  void setControllerTypeUi(int type)
+  {
+    const int clamped = std::clamp(type, 0, 8);
+    const QSignalBlocker blocker(controller_combo_);
+    const int index = controller_combo_->findData(clamped);
+    if (index >= 0) {
+      controller_combo_->setCurrentIndex(index);
+    }
+  }
+
+  void setCtrlModeUi(int mode)
+  {
+    const int clamped = std::clamp(
+      mode, geometric_controller::kErrorQuaternion,
+      geometric_controller::kErrorGeometric);
+    const QSignalBlocker blocker(ctrl_mode_combo_);
+    const int index = ctrl_mode_combo_->findData(clamped);
+    if (index >= 0) {
+      ctrl_mode_combo_->setCurrentIndex(index);
+    }
   }
 
   void setOmegaUi(double value)
@@ -485,6 +653,8 @@ private:
   std::unique_ptr<QWidget> window_;
   QLabel * status_label_{nullptr};
   QComboBox * trajectory_combo_{nullptr};
+  QComboBox * controller_combo_{nullptr};
+  QComboBox * ctrl_mode_combo_{nullptr};
   QStackedWidget * shape_stack_{nullptr};
   QSlider * omega_slider_{nullptr};
   QDoubleSpinBox * omega_spin_{nullptr};

@@ -16,6 +16,7 @@ find_package(px4_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
 add_library(reference_trajectory src/reference_trajectory.cpp)
@@ -24,9 +25,19 @@ target_include_directories(reference_trajectory PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_compile_features(reference_trajectory PUBLIC cxx_std_17)
 
+add_library(controller_algorithms
+  src/controller_factory.cpp
+  src/full_wrench_controllers.cpp
+  src/main_controller_math.cpp)
+target_include_directories(controller_algorithms PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(controller_algorithms PUBLIC cxx_std_17)
+target_link_libraries(controller_algorithms PUBLIC Eigen3::Eigen)
+
 add_executable(trajectory_offboard_node src/geometric_controller_node.cpp)
 target_compile_features(trajectory_offboard_node PUBLIC cxx_std_17)
-target_link_libraries(trajectory_offboard_node reference_trajectory)
+target_link_libraries(trajectory_offboard_node reference_trajectory controller_algorithms Eigen3::Eigen)
 ament_target_dependencies(trajectory_offboard_node
   rclcpp
   px4_msgs
@@ -36,12 +47,13 @@ ament_target_dependencies(trajectory_offboard_node
 
 add_executable(trajectory_control_panel src/trajectory_control_panel.cpp)
 target_compile_features(trajectory_control_panel PUBLIC cxx_std_17)
-target_link_libraries(trajectory_control_panel reference_trajectory Qt5::Widgets)
+target_link_libraries(
+  trajectory_control_panel reference_trajectory controller_algorithms Eigen3::Eigen Qt5::Widgets)
 ament_target_dependencies(trajectory_control_panel
   rclcpp
   rcl_interfaces)
 
-install(TARGETS reference_trajectory
+install(TARGETS reference_trajectory controller_algorithms
   EXPORT export_reference_trajectory
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib)
@@ -68,7 +80,15 @@ ament_export_targets(export_reference_trajectory HAS_LIBRARY_TARGET)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  # This vendored header keeps the original Jaeyoung Lim BSD-3-Clause notice.
+  set(AMENT_LINT_AUTO_FILE_EXCLUDE
+    include/geometric_controller/controllers/common.hpp)
   ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(controller_algorithms_test test/controller_algorithms_test.cpp)
+  target_link_libraries(
+    controller_algorithms_test controller_algorithms reference_trajectory Eigen3::Eigen)
+  target_include_directories(controller_algorithms_test PRIVATE include)
 endif()
 
 ament_package()

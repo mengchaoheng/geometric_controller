@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <Eigen/Dense>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -26,16 +27,24 @@
 #include <nav_msgs/msg/path.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_attitude.hpp>
+#include <px4_msgs/msg/vehicle_angular_velocity.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
 #include <rcl_interfaces/msg/floating_point_range.hpp>
 #include <rcl_interfaces/msg/integer_range.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "geometric_controller/controllers/controller_factory.hpp"
+#include "geometric_controller/controllers/velocity_acceleration_filter.hpp"
+#include "geometric_controller/controllers/wrench_normalization.hpp"
 #include "geometric_controller/reference_trajectory.hpp"
 
 namespace
@@ -48,9 +57,15 @@ constexpr float kMavModeFlagCustomModeEnabled = 1.0F;
 constexpr float kPx4CustomMainModeOffboard = 6.0F;
 constexpr float kVehicleCommandArm = 1.0F;
 constexpr float kVehicleCommandParamUnused = 0.0F;
-constexpr double kSetpointRateHzDefault = 100.0;
+constexpr double kSetpointRateHzDefault = 250.0;
 constexpr double kSetpointRateHzMin = 50.0;
 constexpr double kSetpointRateHzMax = 250.0;
+constexpr double kInnerLoopRateHzDefault = 250.0;
+constexpr double kInnerLoopRateHzMin = 50.0;
+constexpr double kInnerLoopRateHzMax = 250.0;
+constexpr double kOuterLoopRateHzDefault = 125.0;
+constexpr double kOuterLoopRateHzMin = 10.0;
+constexpr double kOuterLoopRateHzMax = 250.0;
 constexpr double kHeartbeatRateHzDefault = 5.0;
 constexpr double kHeartbeatRateHzMin = 3.0;
 constexpr double kHeartbeatRateHzMax = 10.0;
@@ -227,6 +242,7 @@ public:
     loadParameters();
     syncSelectorParameters();
     reference_trajectory_.setParameters(trajectory_parameters_);
+    configureActiveController(false);
     configureRosInterfaces();
     configureTimers();
 
@@ -236,10 +252,19 @@ public:
     start_time_ = now();
     RCLCPP_INFO(
       get_logger(),
-      "Trajectory offboard ready: trajName=%s omega_value=%.3f setpoint.level=%s "
-      "setpoint_rate=%.1f Hz heartbeat_rate=%.1f Hz",
+      "Trajectory offboard ready: controller=%s trajName=%s omega_value=%.3f setpoint.level=%s "
+      "setpoint_rate=%.1f Hz outer_loop=%.1f Hz inner_loop=%.1f Hz heartbeat_rate=%.1f Hz",
+      geometric_controller::controllerTypeName(active_controller_type_).c_str(),
       trajectory_parameters_.traj_name.c_str(), trajectory_parameters_.omega_value,
-      setpoint_level_.c_str(), setpoint_rate_hz_, heartbeat_rate_hz_);
+      setpoint_level_.c_str(), setpoint_rate_hz_, outer_loop_rate_hz_,
+      inner_loop_rate_hz_, heartbeat_rate_hz_);
+    RCLCPP_INFO(
+      get_logger(),
+      "PX4 normalization constants: thrust=%.9f kg/N offset=%.6f "
+      "torque=[%.6f, %.6f, %.6f] 1/(N*m)",
+      normalizedthrust_constant_, normalizedthrust_offset_,
+      normalizedtorque_constant_.x(), normalizedtorque_constant_.y(),
+      normalizedtorque_constant_.z());
     if (!auto_start_) {
       RCLCPP_WARN(
         get_logger(),
@@ -289,6 +314,16 @@ private:
         "Deprecated alias for offboard.setpoint_rate_hz. Use 0 to disable the alias.",
         0.0, kSetpointRateHzMax, 1.0));
     declare_parameter<double>(
+      "outer_loop_rate_hz", kOuterLoopRateHzDefault,
+      describeDouble(
+        "Position/reference outer-loop update rate for ROS-side controllers [Hz].",
+        kOuterLoopRateHzMin, kOuterLoopRateHzMax, 1.0));
+    declare_parameter<double>(
+      "inner_loop_rate_hz", kInnerLoopRateHzDefault,
+      describeDouble(
+        "Angular-rate feedback and wrench publication rate for ROS-side controllers [Hz].",
+        kInnerLoopRateHzMin, kInnerLoopRateHzMax, 1.0));
+    declare_parameter<double>(
       "offboard.auto_start_retry_period_s", 1.0,
       describeDouble("Retry period for automatic Offboard/Arm commands [s].", 0.2, 10.0, 0.1));
     declare_parameter<bool>(
@@ -322,13 +357,97 @@ private:
       "setpoint.acceleration_feedforward", true,
       describeParameter(
       "Include acceleration feedforward when setpoint.level is position or velocity."));
-    declare_parameter<bool>(
-      "setpoint.yaw_rate_feedforward", true,
-      describeParameter("Include yaw-rate feedforward in TrajectorySetpoint."));
+    declare_parameter<int>(
+      "controller_type", 8,
+      describeInteger(
+        "Controller selector: 0 legacy_geometric, 1 main_geometric, 2 main_lee, "
+        "3 main_johnson, 4 main_sun_dfbc, 5 main_sun_dfbc_indi, 6 main_tal, "
+        "7 main_geometric_indi, 8 px4_direct.",
+        0, 8, 1));
+    declare_parameter<int>(
+      "ctrl_mode", geometric_controller::kErrorQuaternion,
+      describeInteger("Legacy attitude error: 1 quaternion, 2 geometric.", 1, 2, 1));
+    declare_parameter<double>(
+      "gravity", 9.81, describeDouble("Gravity magnitude used by ROS-side controllers [m/s^2].",
+      1.0, 20.0, 0.01));
+    declare_parameter<double>("drag_dx", 0.0, describeDouble("Body x linear drag coefficient.", 0.0,
+      10.0, 0.01));
+    declare_parameter<double>("drag_dy", 0.0, describeDouble("Body y linear drag coefficient.", 0.0,
+      10.0, 0.01));
+    declare_parameter<double>("drag_dz", 0.0, describeDouble("Body z linear drag coefficient.", 0.0,
+      10.0, 0.01));
+    declare_parameter<double>(
+      "max_acc", 45.0,
+      describeDouble("Maximum norm of position feedback acceleration [m/s^2].", 1.0, 100.0,
+      0.1));
+    declare_parameter<double>("mass", 0.75, describeDouble("Vehicle mass [kg].", 0.05, 50.0,
+      0.001));
+    declare_parameter<double>("inertia_x", 0.0025, describeDouble("Body roll inertia [kg m^2].",
+      0.00001, 10.0, 0.00001));
+    declare_parameter<double>("inertia_y", 0.0021, describeDouble("Body pitch inertia [kg m^2].",
+      0.00001, 10.0, 0.00001));
+    declare_parameter<double>("inertia_z", 0.0043, describeDouble("Body yaw inertia [kg m^2].",
+      0.00001, 10.0, 0.00001));
+    declare_parameter<double>("indi_filter_cutoff_hz", 30.0,
+      describeDouble("Second-order Butterworth cutoff used by INDI feedback [Hz].", 0.0, 100.0,
+      1.0));
+    declare_parameter<double>("indi_velocity_lpf_hz", 0.0,
+      describeDouble("PX4 MPC_VEL_LP-equivalent velocity LPF cutoff [Hz].", 0.0, 50.0, 0.5));
+    declare_parameter<double>("indi_velocity_notch_hz", 0.0,
+      describeDouble(
+        "PX4 MPC_VEL_NF_FRQ-equivalent velocity notch frequency [Hz].", 0.0, 50.0, 0.5));
+    declare_parameter<double>("indi_velocity_notch_bandwidth_hz", 5.0,
+      describeDouble(
+        "PX4 MPC_VEL_NF_BW-equivalent velocity notch bandwidth [Hz].", 0.0, 50.0, 0.5));
+    declare_parameter<double>("indi_velocity_derivative_lpf_hz", 5.0,
+      describeDouble(
+        "PX4 MPC_VELD_LP-equivalent velocity-derivative LPF cutoff [Hz].", 0.0, 50.0, 0.5));
+    declare_parameter<double>("Kp_x", 10.0, describeDouble("Position gain x.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("Kp_y", 10.0, describeDouble("Position gain y.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("Kp_z", 10.0, describeDouble("Position gain z.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("Kv_x", 6.0, describeDouble("Velocity gain x.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("Kv_y", 6.0, describeDouble("Velocity gain y.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("Kv_z", 6.0, describeDouble("Velocity gain z.", 0.0, 40.0, 0.1));
+    declare_parameter<double>("KR_r", 150.0, describeDouble("Roll attitude acceleration gain.",
+      0.0, 500.0, 1.0));
+    declare_parameter<double>("KR_p", 150.0, describeDouble("Pitch attitude acceleration gain.",
+      0.0, 500.0, 1.0));
+    declare_parameter<double>("KR_y", 80.0, describeDouble("Yaw attitude acceleration gain.",
+      0.0, 100.0, 0.1));
+    declare_parameter<double>("KOmega_r", 50.0, describeDouble("Roll angular-rate gain.", 0.0,
+      100.0, 0.1));
+    declare_parameter<double>("KOmega_p", 50.0, describeDouble("Pitch angular-rate gain.", 0.0,
+      100.0, 0.1));
+    declare_parameter<double>("KOmega_y", 3.0, describeDouble("Yaw angular-rate gain.", 0.0,
+      100.0, 0.1));
+
+    declare_parameter<double>(
+      "normalizedthrust_constant", 0.022058823529,
+      describeDouble(
+        "PX4 normalized thrust coefficient m/T_max [kg/N].", 0.0, 1.0, 0.000001));
+    declare_parameter<double>(
+      "normalizedthrust_offset", 0.0,
+      describeDouble("PX4 normalized collective-thrust offset.", -1.0, 1.0, 0.0001));
+    declare_parameter<double>(
+      "normalizedtorque_constant_r", 0.319957823650,
+      describeDouble("Physical roll moment to PX4 normalized torque scale [1/(N m)].",
+      0.0, 1000.0, 0.0001));
+    declare_parameter<double>(
+      "normalizedtorque_constant_p", 0.319957823650,
+      describeDouble("Physical pitch moment to PX4 normalized torque scale [1/(N m)].",
+      0.0, 1000.0, 0.0001));
+    declare_parameter<double>(
+      "normalizedtorque_constant_y", 1.962568474088,
+      describeDouble("Physical yaw moment to PX4 normalized torque scale [1/(N m)].",
+      0.0, 1000.0, 0.0001));
 
     declare_parameter<std::string>("px4.offboard_control_mode_topic",
       "/fmu/in/offboard_control_mode");
     declare_parameter<std::string>("px4.trajectory_setpoint_topic", "/fmu/in/trajectory_setpoint");
+    declare_parameter<std::string>(
+      "px4.vehicle_thrust_setpoint_topic", "/fmu/in/vehicle_thrust_setpoint");
+    declare_parameter<std::string>(
+      "px4.vehicle_torque_setpoint_topic", "/fmu/in/vehicle_torque_setpoint");
     declare_parameter<std::string>("px4.vehicle_command_topic", "/fmu/in/vehicle_command");
     declare_parameter<std::string>("px4.vehicle_status_topic",
       px4VersionedTopic<px4_msgs::msg::VehicleStatus>("/fmu/out/vehicle_status"));
@@ -336,6 +455,12 @@ private:
       px4VersionedTopic<px4_msgs::msg::VehicleLocalPosition>(
         "/fmu/out/vehicle_local_position"));
     declare_parameter<std::string>("px4.vehicle_odometry_topic", "/fmu/out/vehicle_odometry");
+    declare_parameter<std::string>(
+      "px4.vehicle_attitude_topic", "/fmu/out/vehicle_attitude");
+    declare_parameter<std::string>(
+      "px4.vehicle_angular_velocity_topic", "/fmu/out/vehicle_angular_velocity");
+    declare_parameter<std::string>(
+      "px4.vehicle_control_mode_topic", "/fmu/out/vehicle_control_mode");
     declare_parameter<int>("px4.target_system", 1);
     declare_parameter<int>("px4.target_component", 1);
     declare_parameter<int>("px4.source_system", 1);
@@ -384,53 +509,53 @@ private:
       describeDouble("Trajectory origin y in PX4 NED frame [m].", -20.0, 20.0, 0.1));
 
     declare_parameter<double>(
-      "figure8_horizontal_Ax", 2.0, describeDouble("figure8_horizontal.Ax [m].", 0.1, 10.0, 0.1));
+      "figure8_horizontal_Ax", 3.0, describeDouble("figure8_horizontal.Ax [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "figure8_horizontal_Ay", 2.0, describeDouble("figure8_horizontal.Ay [m].", 0.1, 10.0, 0.1));
+      "figure8_horizontal_Ay", 3.0, describeDouble("figure8_horizontal.Ay [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "figure8_horizontal_Hc", 3.0, describeDouble("figure8_horizontal.Hc [m].", 0.5, 10.0, 0.1));
+      "figure8_horizontal_Hc", 6.0, describeDouble("figure8_horizontal.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "figure8_horizontal_theta0", 0.0,
       describeDouble("figure8_horizontal.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
-      "figure8_vertical_Ay", 2.0, describeDouble("figure8_vertical.Ay [m].", 0.1, 10.0, 0.1));
+      "figure8_vertical_Ay", 3.0, describeDouble("figure8_vertical.Ay [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "figure8_vertical_Az", 2.0, describeDouble("figure8_vertical.Az [m].", 0.1, 10.0, 0.1));
+      "figure8_vertical_Az", 3.0, describeDouble("figure8_vertical.Az [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "figure8_vertical_Hc", 3.0, describeDouble("figure8_vertical.Hc [m].", 0.5, 10.0, 0.1));
+      "figure8_vertical_Hc", 6.0, describeDouble("figure8_vertical.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "figure8_vertical_theta0", -0.7853981633974483,
       describeDouble("figure8_vertical.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
-      "helix_flip_Ay", 2.0, describeDouble("helix_flip.Ay [m].", 0.1, 10.0, 0.1));
+      "helix_flip_Ay", 3.0, describeDouble("helix_flip.Ay [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "helix_flip_Az", 2.0, describeDouble("helix_flip.Az [m].", 0.1, 10.0, 0.1));
+      "helix_flip_Az", 3.0, describeDouble("helix_flip.Az [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "helix_flip_Hc", 3.0, describeDouble("helix_flip.Hc [m].", 0.5, 10.0, 0.1));
+      "helix_flip_Hc", 6.0, describeDouble("helix_flip.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "helix_flip_Vx", 0.30, describeDouble("helix_flip.Vx [m/s].", -5.0, 5.0, 0.1));
     declare_parameter<double>(
       "helix_flip_theta0", 0.0, describeDouble("helix_flip.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
-      "helix_flip_y_Ax", 2.0, describeDouble("helix_flip_y.Ax [m].", 0.1, 10.0, 0.1));
+      "helix_flip_y_Ax", 3.0, describeDouble("helix_flip_y.Ax [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "helix_flip_y_Az", 2.0, describeDouble("helix_flip_y.Az [m].", 0.1, 10.0, 0.1));
+      "helix_flip_y_Az", 3.0, describeDouble("helix_flip_y.Az [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "helix_flip_y_Hc", 3.0, describeDouble("helix_flip_y.Hc [m].", 0.5, 10.0, 0.1));
+      "helix_flip_y_Hc", 6.0, describeDouble("helix_flip_y.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "helix_flip_y_Vy", 0.30, describeDouble("helix_flip_y.Vy [m/s].", -5.0, 5.0, 0.1));
     declare_parameter<double>(
       "helix_flip_y_theta0", 0.0, describeDouble("helix_flip_y.theta0 [rad].", -kPi, kPi, 0.01));
 
     declare_parameter<double>(
-      "flip_loop_sine_Ay", 2.0, describeDouble("flip_loop_sine.Ay [m].", 0.1, 10.0, 0.1));
+      "flip_loop_sine_Ay", 3.0, describeDouble("flip_loop_sine.Ay [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "flip_loop_sine_Az", 2.0, describeDouble("flip_loop_sine.Az [m].", 0.1, 10.0, 0.1));
+      "flip_loop_sine_Az", 3.0, describeDouble("flip_loop_sine.Az [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "flip_loop_sine_Hc", 3.0, describeDouble("flip_loop_sine.Hc [m].", 0.5, 10.0, 0.1));
+      "flip_loop_sine_Hc", 6.0, describeDouble("flip_loop_sine.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "flip_loop_sine_Vx", 0.0, describeDouble("flip_loop_sine.Vx [m/s].", -5.0, 5.0, 0.1));
     declare_parameter<double>(
@@ -442,7 +567,7 @@ private:
     declare_parameter<double>(
       "fast_circle_Ay", 3.0, describeDouble("fast_circle.Ay [m].", 0.1, 10.0, 0.1));
     declare_parameter<double>(
-      "fast_circle_Hc", 3.0, describeDouble("fast_circle.Hc [m].", 0.5, 10.0, 0.1));
+      "fast_circle_Hc", 6.0, describeDouble("fast_circle.Hc [m].", 0.5, 10.0, 0.1));
     declare_parameter<double>(
       "fast_circle_theta0", 0.0, describeDouble("fast_circle.theta0 [rad].", -kPi, kPi, 0.01));
   }
@@ -459,6 +584,12 @@ private:
       legacy_publish_rate_hz : get_parameter("offboard.setpoint_rate_hz").as_double();
     setpoint_rate_hz_ =
       std::clamp(requested_setpoint_rate_hz, kSetpointRateHzMin, kSetpointRateHzMax);
+    outer_loop_rate_hz_ = std::clamp(
+      get_parameter("outer_loop_rate_hz").as_double(),
+      kOuterLoopRateHzMin, kOuterLoopRateHzMax);
+    inner_loop_rate_hz_ = std::clamp(
+      get_parameter("inner_loop_rate_hz").as_double(),
+      kInnerLoopRateHzMin, kInnerLoopRateHzMax);
     heartbeat_rate_hz_ = std::clamp(
       get_parameter("offboard.heartbeat_rate_hz").as_double(), kHeartbeatRateHzMin,
       kHeartbeatRateHzMax);
@@ -476,14 +607,68 @@ private:
     setpoint_level_ = normalizeSetpointLevel(get_parameter("setpoint.level").as_string());
     velocity_feedforward_ = get_parameter("setpoint.velocity_feedforward").as_bool();
     acceleration_feedforward_ = get_parameter("setpoint.acceleration_feedforward").as_bool();
-    yaw_rate_feedforward_ = get_parameter("setpoint.yaw_rate_feedforward").as_bool();
+    active_controller_type_ = geometric_controller::controllerTypeFromId(
+      static_cast<int>(get_parameter("controller_type").as_int()));
+    controller_params_.ctrl_mode = static_cast<int>(get_parameter("ctrl_mode").as_int());
+    controller_params_.gravity =
+      Eigen::Vector3d(0.0, 0.0, std::abs(get_parameter("gravity").as_double()));
+    controller_params_.drag = Eigen::Vector3d(
+      get_parameter("drag_dx").as_double(),
+      get_parameter("drag_dy").as_double(),
+      get_parameter("drag_dz").as_double());
+    controller_params_.Kp = Eigen::Vector3d(
+      get_parameter("Kp_x").as_double(),
+      get_parameter("Kp_y").as_double(),
+      get_parameter("Kp_z").as_double());
+    controller_params_.Kv = Eigen::Vector3d(
+      get_parameter("Kv_x").as_double(),
+      get_parameter("Kv_y").as_double(),
+      get_parameter("Kv_z").as_double());
+    controller_params_.KR = Eigen::Vector3d(
+      get_parameter("KR_r").as_double(),
+      get_parameter("KR_p").as_double(),
+      get_parameter("KR_y").as_double());
+    controller_params_.KOmega = Eigen::Vector3d(
+      get_parameter("KOmega_r").as_double(),
+      get_parameter("KOmega_p").as_double(),
+      get_parameter("KOmega_y").as_double());
+    controller_params_.mass = get_parameter("mass").as_double();
+    controller_params_.inertia = Eigen::Vector3d(
+      get_parameter("inertia_x").as_double(),
+      get_parameter("inertia_y").as_double(),
+      get_parameter("inertia_z").as_double()).asDiagonal();
+    controller_params_.indi_filter_cutoff_hz =
+      get_parameter("indi_filter_cutoff_hz").as_double();
+    velocity_acceleration_filter_params_.velocity_lpf_hz =
+      get_parameter("indi_velocity_lpf_hz").as_double();
+    velocity_acceleration_filter_params_.velocity_notch_hz =
+      get_parameter("indi_velocity_notch_hz").as_double();
+    velocity_acceleration_filter_params_.velocity_notch_bandwidth_hz =
+      get_parameter("indi_velocity_notch_bandwidth_hz").as_double();
+    velocity_acceleration_filter_params_.derivative_lpf_hz =
+      get_parameter("indi_velocity_derivative_lpf_hz").as_double();
+    controller_params_.max_feedback_acc = get_parameter("max_acc").as_double();
+    normalizedthrust_constant_ = get_parameter("normalizedthrust_constant").as_double();
+    normalizedthrust_offset_ = get_parameter("normalizedthrust_offset").as_double();
+    normalizedtorque_constant_ = Eigen::Vector3d(
+      get_parameter("normalizedtorque_constant_r").as_double(),
+      get_parameter("normalizedtorque_constant_p").as_double(),
+      get_parameter("normalizedtorque_constant_y").as_double());
 
     offboard_control_mode_topic_ = get_parameter("px4.offboard_control_mode_topic").as_string();
     trajectory_setpoint_topic_ = get_parameter("px4.trajectory_setpoint_topic").as_string();
+    vehicle_thrust_setpoint_topic_ =
+      get_parameter("px4.vehicle_thrust_setpoint_topic").as_string();
+    vehicle_torque_setpoint_topic_ =
+      get_parameter("px4.vehicle_torque_setpoint_topic").as_string();
     vehicle_command_topic_ = get_parameter("px4.vehicle_command_topic").as_string();
     vehicle_status_topic_ = get_parameter("px4.vehicle_status_topic").as_string();
     vehicle_local_position_topic_ = get_parameter("px4.vehicle_local_position_topic").as_string();
     vehicle_odometry_topic_ = get_parameter("px4.vehicle_odometry_topic").as_string();
+    vehicle_attitude_topic_ = get_parameter("px4.vehicle_attitude_topic").as_string();
+    vehicle_angular_velocity_topic_ =
+      get_parameter("px4.vehicle_angular_velocity_topic").as_string();
+    vehicle_control_mode_topic_ = get_parameter("px4.vehicle_control_mode_topic").as_string();
     target_system_ = static_cast<uint8_t>(
       std::clamp<int64_t>(get_parameter("px4.target_system").as_int(), kMavlinkIdMin,
       kMavlinkIdMax));
@@ -587,6 +772,12 @@ private:
       px4_pub_qos);
     trajectory_setpoint_publisher_ =
       create_publisher<px4_msgs::msg::TrajectorySetpoint>(trajectory_setpoint_topic_, px4_pub_qos);
+    vehicle_thrust_setpoint_publisher_ =
+      create_publisher<px4_msgs::msg::VehicleThrustSetpoint>(
+      vehicle_thrust_setpoint_topic_, px4_pub_qos);
+    vehicle_torque_setpoint_publisher_ =
+      create_publisher<px4_msgs::msg::VehicleTorqueSetpoint>(
+      vehicle_torque_setpoint_topic_, px4_pub_qos);
     vehicle_command_publisher_ =
       create_publisher<px4_msgs::msg::VehicleCommand>(vehicle_command_topic_, px4_pub_qos);
 
@@ -605,6 +796,26 @@ private:
       vehicle_odometry_subscriber_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
         vehicle_odometry_topic_, px4_sub_qos,
         std::bind(&TrajectoryOffboardNode::vehicleOdometryCallback, this, std::placeholders::_1));
+    }
+    if (!vehicle_attitude_topic_.empty()) {
+      vehicle_attitude_subscriber_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
+        vehicle_attitude_topic_, px4_sub_qos,
+        std::bind(&TrajectoryOffboardNode::vehicleAttitudeCallback, this, std::placeholders::_1));
+    }
+    if (!vehicle_angular_velocity_topic_.empty()) {
+      vehicle_angular_velocity_subscriber_ =
+        create_subscription<px4_msgs::msg::VehicleAngularVelocity>(
+        vehicle_angular_velocity_topic_, px4_sub_qos,
+        std::bind(
+          &TrajectoryOffboardNode::vehicleAngularVelocityCallback, this,
+          std::placeholders::_1));
+    }
+    if (!vehicle_control_mode_topic_.empty()) {
+      vehicle_control_mode_subscriber_ = create_subscription<px4_msgs::msg::VehicleControlMode>(
+        vehicle_control_mode_topic_, px4_sub_qos,
+        std::bind(
+          &TrajectoryOffboardNode::vehicleControlModeCallback, this,
+          std::placeholders::_1));
     }
 
     auto reference_path_qos = rclcpp::QoS(rclcpp::KeepLast(1));
@@ -626,13 +837,44 @@ private:
     configureHeartbeatTimer();
   }
 
+  void configureActiveController(bool log_change, bool require_px4_mode_transition = false)
+  {
+    active_controller_ = geometric_controller::makeController(active_controller_type_);
+    last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    last_controller_sample_timestamp_ = 0;
+    next_controller_sample_timestamp_ = 0;
+    controller_reference_received_ = false;
+    controller_mode_transition_pending_ =
+      log_change && isOffboard() && require_px4_mode_transition &&
+      geometric_controller::isRosController(active_controller_type_);
+    if (active_controller_ && controllerFeedbackValid()) {
+      active_controller_->reset(controllerState());
+    }
+    if (log_change) {
+      RCLCPP_INFO(
+        get_logger(), "Controller switched to %s (%s output).",
+        geometric_controller::controllerTypeName(active_controller_type_).c_str(),
+        geometric_controller::isRosController(active_controller_type_) ?
+        "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint");
+      if (controller_mode_transition_pending_) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Waiting for PX4 VehicleControlMode to disable attitude/rate control and enable "
+          "control allocation before publishing the first wrench.");
+      }
+    }
+  }
+
   void configureSetpointTimer()
   {
     if (setpoint_timer_) {
       setpoint_timer_->cancel();
     }
+    const double timer_rate_hz =
+      geometric_controller::isRosController(active_controller_type_) ?
+      outer_loop_rate_hz_ : setpoint_rate_hz_;
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::duration<double>(1.0 / setpoint_rate_hz_));
+      std::chrono::duration<double>(1.0 / timer_rate_hz));
     setpoint_timer_ =
       create_wall_timer(period, std::bind(&TrajectoryOffboardNode::setpointTimerCallback, this));
   }
@@ -684,6 +926,23 @@ private:
         result.reason = "setpoint.level must be position, velocity, or acceleration";
         return result;
       }
+      if (name == "controller_type" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
+        (parameter.as_int() < 0 || parameter.as_int() > 8))
+      {
+        result.successful = false;
+        result.reason = "controller_type must be in [0, 8]";
+        return result;
+      }
+      if (name == "ctrl_mode" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
+        (parameter.as_int() < geometric_controller::kErrorQuaternion ||
+        parameter.as_int() > geometric_controller::kErrorGeometric))
+      {
+        result.successful = false;
+        result.reason = "ctrl_mode must be 1 (quaternion) or 2 (geometric)";
+        return result;
+      }
       if ((name == "px4.target_system" || name == "px4.target_component" ||
         name == "px4.source_system" || name == "px4.source_component") &&
         parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
@@ -702,12 +961,47 @@ private:
         result.reason = name + " must be positive";
         return result;
       }
+      if ((name == "mass" || name == "normalizedthrust_constant" ||
+        name == "normalizedtorque_constant_r" ||
+        name == "normalizedtorque_constant_p" ||
+        name == "normalizedtorque_constant_y") &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        (!std::isfinite(parameter.as_double()) || parameter.as_double() <= 0.0))
+      {
+        result.successful = false;
+        result.reason = name + " must be finite and positive";
+        return result;
+      }
+      if (name == "normalizedthrust_offset" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), -1.0, 1.0))
+      {
+        result.successful = false;
+        result.reason = "normalizedthrust_offset must be in [-1, 1]";
+        return result;
+      }
       if (name == "offboard.setpoint_rate_hz" &&
         parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
         !isInClosedRange(parameter.as_double(), kSetpointRateHzMin, kSetpointRateHzMax))
       {
         result.successful = false;
         result.reason = "offboard.setpoint_rate_hz must be in [50, 250]";
+        return result;
+      }
+      if (name == "outer_loop_rate_hz" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), kOuterLoopRateHzMin, kOuterLoopRateHzMax))
+      {
+        result.successful = false;
+        result.reason = "outer_loop_rate_hz must be in [10, 250]";
+        return result;
+      }
+      if (name == "inner_loop_rate_hz" &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), kInnerLoopRateHzMin, kInnerLoopRateHzMax))
+      {
+        result.successful = false;
+        result.reason = "inner_loop_rate_hz must be in [50, 250]";
         return result;
       }
       if (name == "offboard.heartbeat_rate_hz" &&
@@ -730,9 +1024,23 @@ private:
           return result;
         }
       }
+      if (startsWith(name, "indi_velocity_") &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
+        !isInClosedRange(parameter.as_double(), 0.0, 50.0))
+      {
+        result.successful = false;
+        result.reason = name + " must be in [0, 50]";
+        return result;
+      }
 
       if (parameterAffectsTrajectoryRestart(name)) {
         trajectory_reset_pending_ = true;
+      }
+      if (parameterAffectsControllerReset(name)) {
+        controller_reset_pending_ = true;
+      }
+      if (startsWith(name, "indi_velocity_")) {
+        velocity_acceleration_filter_reset_pending_ = true;
       }
       if (name == "trajectory_type") {
         prefer_trajectory_type_ = true;
@@ -766,6 +1074,17 @@ private:
            startsWith(name, "flip_loop_") || startsWith(name, "fast_circle_");
   }
 
+  bool parameterAffectsControllerReset(const std::string & name) const
+  {
+    return name == "ctrl_mode" || name == "gravity" ||
+           name == "mass" || name == "indi_filter_cutoff_hz" ||
+           startsWith(name, "indi_velocity_") ||
+           name == "max_acc" || startsWith(name, "drag_") ||
+           startsWith(name, "inertia_") || startsWith(name, "Kp_") ||
+           startsWith(name, "Kv_") || startsWith(name, "KR_") ||
+           startsWith(name, "KOmega_");
+  }
+
   static std::string normalizeSetpointLevel(std::string value)
   {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -796,13 +1115,21 @@ private:
     }
 
     const double previous_setpoint_rate = setpoint_rate_hz_;
+    const double previous_outer_loop_rate = outer_loop_rate_hz_;
+    const double previous_inner_loop_rate = inner_loop_rate_hz_;
     const double previous_heartbeat_rate = heartbeat_rate_hz_;
+    const auto previous_controller_type = active_controller_type_;
     const std::string previous_offboard_topic = offboard_control_mode_topic_;
     const std::string previous_trajectory_topic = trajectory_setpoint_topic_;
+    const std::string previous_thrust_topic = vehicle_thrust_setpoint_topic_;
+    const std::string previous_torque_topic = vehicle_torque_setpoint_topic_;
     const std::string previous_command_topic = vehicle_command_topic_;
     const std::string previous_status_topic = vehicle_status_topic_;
     const std::string previous_local_position_topic = vehicle_local_position_topic_;
     const std::string previous_odometry_topic = vehicle_odometry_topic_;
+    const std::string previous_attitude_topic = vehicle_attitude_topic_;
+    const std::string previous_angular_velocity_topic = vehicle_angular_velocity_topic_;
+    const std::string previous_control_mode_topic = vehicle_control_mode_topic_;
     const std::string previous_path_topic = visualization_path_topic_;
     const std::string previous_pose_topic = visualization_pose_topic_;
     const std::string previous_vehicle_pose_topic = visualization_vehicle_pose_topic_;
@@ -816,7 +1143,28 @@ private:
       preserve_phase ? reference_trajectory_.theta(elapsed_time_s) : 0.0;
 
     loadParameters();
+    if (velocity_acceleration_filter_reset_pending_) {
+      velocity_acceleration_filter_.reset();
+      filtered_velocity_acceleration_ned_.setZero();
+      filtered_velocity_acceleration_valid_ = false;
+      last_velocity_filter_timestamp_sample_ = 0;
+    }
     syncSelectorParameters();
+    if (previous_controller_type != active_controller_type_) {
+      const bool require_px4_mode_transition =
+        !geometric_controller::isRosController(previous_controller_type) &&
+        geometric_controller::isRosController(active_controller_type_);
+      configureActiveController(true, require_px4_mode_transition);
+      if (offboard_enabled_) {
+        publishOffboardControlMode(now());
+      }
+    } else if (controller_reset_pending_ && active_controller_ && controllerFeedbackValid()) {
+      active_controller_->reset(controllerState());
+      last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+      RCLCPP_INFO(
+        get_logger(), "Reset %s state after controller parameter update.",
+        active_controller_->name().c_str());
+    }
 
     if (preserve_phase) {
       geometric_controller::ReferenceTrajectory candidate(trajectory_parameters_);
@@ -838,10 +1186,15 @@ private:
     const bool topics_changed =
       previous_offboard_topic != offboard_control_mode_topic_ ||
       previous_trajectory_topic != trajectory_setpoint_topic_ ||
+      previous_thrust_topic != vehicle_thrust_setpoint_topic_ ||
+      previous_torque_topic != vehicle_torque_setpoint_topic_ ||
       previous_command_topic != vehicle_command_topic_ ||
       previous_status_topic != vehicle_status_topic_ ||
       previous_local_position_topic != vehicle_local_position_topic_ ||
       previous_odometry_topic != vehicle_odometry_topic_ ||
+      previous_attitude_topic != vehicle_attitude_topic_ ||
+      previous_angular_velocity_topic != vehicle_angular_velocity_topic_ ||
+      previous_control_mode_topic != vehicle_control_mode_topic_ ||
       previous_path_topic != visualization_path_topic_ ||
       previous_pose_topic != visualization_pose_topic_ ||
       previous_vehicle_pose_topic != visualization_vehicle_pose_topic_ ||
@@ -855,8 +1208,15 @@ private:
     {
       vehicle_path_.clear();
     }
-    if (std::abs(previous_setpoint_rate - setpoint_rate_hz_) > 1e-6) {
+    if (previous_controller_type != active_controller_type_ ||
+      std::abs(previous_setpoint_rate - setpoint_rate_hz_) > 1e-6 ||
+      std::abs(previous_outer_loop_rate - outer_loop_rate_hz_) > 1e-6)
+    {
       configureSetpointTimer();
+    }
+    if (std::abs(previous_inner_loop_rate - inner_loop_rate_hz_) > 1e-6) {
+      last_controller_sample_timestamp_ = 0;
+      next_controller_sample_timestamp_ = 0;
     }
     if (std::abs(previous_heartbeat_rate - heartbeat_rate_hz_) > 1e-6) {
       configureHeartbeatTimer();
@@ -867,6 +1227,8 @@ private:
 
     parameters_pending_ = false;
     trajectory_reset_pending_ = false;
+    controller_reset_pending_ = false;
+    velocity_acceleration_filter_reset_pending_ = false;
     path_publish_time_s_ = -std::numeric_limits<double>::infinity();
 
     RCLCPP_INFO(
@@ -886,6 +1248,13 @@ private:
     trajectory_setpoint_gate_open_ = false;
     auto_start_ready_logged_ = false;
     auto_start_requested_ = false;
+    last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    last_controller_sample_timestamp_ = 0;
+    next_controller_sample_timestamp_ = 0;
+    controller_reference_received_ = false;
+    if (active_controller_ && controllerFeedbackValid()) {
+      active_controller_->reset(controllerState());
+    }
     last_auto_start_command_time_s_ = -std::numeric_limits<double>::infinity();
     last_auto_start_wait_log_time_s_ = -std::numeric_limits<double>::infinity();
     RCLCPP_INFO(get_logger(), "Trajectory reset: %s", reason.c_str());
@@ -898,16 +1267,21 @@ private:
     const auto stamp = now();
     const auto setpoint = currentReference(stamp);
     publishVisualization(setpoint, stamp);
+    if (geometric_controller::isRosController(active_controller_type_)) {
+      controller_reference_sample_ = setpoint;
+      controller_reference_received_ = true;
+    }
 
     if (!offboard_enabled_) {
       return;
     }
 
-    if (!shouldPublishTrajectorySetpoint()) {
+    if (!shouldPublishSetpoint()) {
       if (trajectory_setpoint_gate_open_) {
         trajectory_setpoint_gate_open_ = false;
         RCLCPP_WARN(
-          get_logger(), "Withholding TrajectorySetpoint messages until local position is valid.");
+          get_logger(),
+          "Withholding PX4 setpoints until the selected controller feedback is valid.");
       }
       return;
     }
@@ -916,10 +1290,15 @@ private:
       trajectory_setpoint_gate_open_ = true;
       RCLCPP_INFO(
         get_logger(),
-        "Local position is valid; publishing TrajectorySetpoint at %.1f Hz for Offboard.",
-        setpoint_rate_hz_);
+        "Controller feedback is valid; publishing %s at %.1f Hz for Offboard.",
+        geometric_controller::isRosController(active_controller_type_) ?
+        "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint",
+        geometric_controller::isRosController(active_controller_type_) ?
+        inner_loop_rate_hz_ : setpoint_rate_hz_);
     }
-    publishTrajectorySetpoint(setpoint, stamp);
+    if (!geometric_controller::isRosController(active_controller_type_)) {
+      publishTrajectorySetpoint(setpoint, stamp);
+    }
   }
 
   void heartbeatTimerCallback()
@@ -1082,9 +1461,13 @@ private:
     return false;
   }
 
-  bool shouldPublishTrajectorySetpoint() const
+  bool shouldPublishSetpoint() const
   {
-    return localPositionValid();
+    if (!localPositionValid()) {
+      return false;
+    }
+    return !geometric_controller::isRosController(active_controller_type_) ||
+           controllerFeedbackValid();
   }
 
   std::string autoStartReadinessBlocker() const
@@ -1094,6 +1477,12 @@ private:
     }
     if (!localPositionValid()) {
       return "waiting for valid PX4 local position on '" + vehicle_local_position_topic_ + "'";
+    }
+    if (geometric_controller::isRosController(active_controller_type_) &&
+      !controllerFeedbackValid())
+    {
+      return "waiting for valid PX4 attitude on '" + vehicle_attitude_topic_ +
+             "' and 250 Hz angular velocity on '" + vehicle_angular_velocity_topic_ + "'";
     }
     return {};
   }
@@ -1246,15 +1635,219 @@ private:
   void publishOffboardControlMode(const rclcpp::Time & stamp)
   {
     px4_msgs::msg::OffboardControlMode msg{};
-    msg.position = setpoint_level_ == "position";
-    msg.velocity = setpoint_level_ == "velocity";
-    msg.acceleration = setpoint_level_ == "acceleration";
+    const bool ros_controller =
+      geometric_controller::isRosController(active_controller_type_);
+    msg.position = !ros_controller && setpoint_level_ == "position";
+    msg.velocity = !ros_controller && setpoint_level_ == "velocity";
+    msg.acceleration = !ros_controller && setpoint_level_ == "acceleration";
     msg.attitude = false;
     msg.body_rate = false;
-    msg.thrust_and_torque = false;
+    msg.thrust_and_torque = ros_controller;
     msg.direct_actuator = false;
     msg.timestamp = timestampMicros(stamp);
     offboard_control_mode_publisher_->publish(msg);
+  }
+
+  static Eigen::Vector3d toEigen(const geometric_controller::Vector3 & value)
+  {
+    return Eigen::Vector3d(value[0], value[1], value[2]);
+  }
+
+  geometric_controller::FlatReference controllerReference(
+    const geometric_controller::TrajectorySample & sample) const
+  {
+    geometric_controller::FlatReference reference;
+    reference.position = toEigen(sample.position);
+    reference.velocity = toEigen(sample.velocity);
+    reference.acceleration = toEigen(sample.acceleration);
+    reference.jerk = toEigen(sample.jerk);
+    reference.snap = toEigen(sample.snap);
+    reference.yaw = sample.yaw;
+    reference.yaw_rate = sample.yaw_rate;
+    reference.yaw_accel = sample.yaw_acceleration;
+    return reference;
+  }
+
+  bool controllerFeedbackValid() const
+  {
+    if (!vehicle_attitude_received_ || !vehicle_angular_velocity_received_ ||
+      !localPositionValid())
+    {
+      return false;
+    }
+    const auto & q = vehicle_attitude_.q;
+    const auto & omega = vehicle_angular_velocity_.xyz;
+    return std::isfinite(q[0]) && std::isfinite(q[1]) && std::isfinite(q[2]) &&
+           std::isfinite(q[3]) && std::isfinite(omega[0]) &&
+           std::isfinite(omega[1]) && std::isfinite(omega[2]) &&
+           vehicle_attitude_.timestamp_sample > 0 &&
+           vehicle_angular_velocity_.timestamp_sample > 0;
+  }
+
+  bool rosWrenchModeConfirmed() const
+  {
+    if (!isOffboard()) {
+      return true;
+    }
+    if (!vehicle_control_mode_received_) {
+      return false;
+    }
+    return vehicle_control_mode_.flag_control_offboard_enabled &&
+           vehicle_control_mode_.flag_control_allocation_enabled &&
+           !vehicle_control_mode_.flag_control_position_enabled &&
+           !vehicle_control_mode_.flag_control_velocity_enabled &&
+           !vehicle_control_mode_.flag_control_attitude_enabled &&
+           !vehicle_control_mode_.flag_control_rates_enabled;
+  }
+
+  bool feedbackTimestampsAligned(uint64_t angular_timestamp_sample) const
+  {
+    if (angular_timestamp_sample == 0 || vehicle_attitude_.timestamp_sample == 0 ||
+      vehicle_local_position_.timestamp_sample == 0)
+    {
+      return false;
+    }
+    const auto timestamp_distance = [](uint64_t lhs, uint64_t rhs) {
+        return lhs >= rhs ? lhs - rhs : rhs - lhs;
+      };
+    // Reuse the newest slower-loop state for every fresh gyro sample, as PX4's
+    // own cascade and the MAVROS controller do. Tight one/two-period gates can
+    // create gaps in the torque stream under SITL/DDS scheduling load; PX4 then
+    // holds a stale high-gain torque, which is less safe than using a slightly
+    // older attitude or position sample. Only reject genuinely stale state.
+    const uint64_t attitude_tolerance_us = std::max<uint64_t>(
+      100000, static_cast<uint64_t>(std::ceil(4.0e6 / inner_loop_rate_hz_)));
+    const uint64_t position_tolerance_us = static_cast<uint64_t>(
+      std::max(250000.0, std::ceil(3.0e6 / outer_loop_rate_hz_)));
+    return timestamp_distance(
+      angular_timestamp_sample, vehicle_attitude_.timestamp_sample) <=
+           attitude_tolerance_us &&
+           timestamp_distance(
+      angular_timestamp_sample, vehicle_local_position_.timestamp_sample) <=
+           position_tolerance_us;
+  }
+
+  geometric_controller::VehicleState controllerState() const
+  {
+    geometric_controller::VehicleState state;
+    state.position = toEigen({
+      static_cast<double>(vehicle_local_position_.x),
+      static_cast<double>(vehicle_local_position_.y),
+      static_cast<double>(vehicle_local_position_.z)});
+    state.velocity = toEigen({
+      static_cast<double>(vehicle_local_position_.vx),
+      static_cast<double>(vehicle_local_position_.vy),
+      static_cast<double>(vehicle_local_position_.vz)});
+    // mc_pos_control acceleration INDI uses its private filtered numerical
+    // derivative of NED velocity, not VehicleLocalPosition.ax/ay/az.
+    state.acceleration = filtered_velocity_acceleration_ned_;
+    state.acceleration_valid = filtered_velocity_acceleration_valid_;
+
+    state.attitude = Eigen::Vector4d(
+      static_cast<double>(vehicle_attitude_.q[0]),
+      static_cast<double>(vehicle_attitude_.q[1]),
+      static_cast<double>(vehicle_attitude_.q[2]),
+      static_cast<double>(vehicle_attitude_.q[3]));
+    state.attitude.normalize();
+    state.body_rate = Eigen::Vector3d(
+      static_cast<double>(vehicle_angular_velocity_.xyz[0]),
+      static_cast<double>(vehicle_angular_velocity_.xyz[1]),
+      static_cast<double>(vehicle_angular_velocity_.xyz[2]));
+    state.angular_acceleration = Eigen::Vector3d(
+      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[0]),
+      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[1]),
+      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[2]));
+    state.angular_acceleration_valid = state.angular_acceleration.allFinite();
+    state.yaw = std::atan2(
+      2.0 * (state.attitude[0] * state.attitude[3] +
+      state.attitude[1] * state.attitude[2]),
+      1.0 - 2.0 * (state.attitude[2] * state.attitude[2] +
+      state.attitude[3] * state.attitude[3]));
+    return state;
+  }
+
+  void publishControllerSetpoint(
+    const geometric_controller::TrajectorySample & sample, const rclcpp::Time & stamp,
+    uint64_t feedback_timestamp_sample)
+  {
+    if (!active_controller_) {
+      return;
+    }
+
+    const auto state = controllerState();
+    const auto reference = controllerReference(sample);
+    double dt = 1.0 / inner_loop_rate_hz_;
+    if (last_controller_sample_timestamp_ > 0 &&
+      feedback_timestamp_sample > last_controller_sample_timestamp_)
+    {
+      dt = std::clamp(
+        static_cast<double>(
+          feedback_timestamp_sample - last_controller_sample_timestamp_) * 1e-6,
+        0.0002, 0.1);
+    }
+    last_controller_sample_timestamp_ = feedback_timestamp_sample;
+    last_controller_update_time_ = stamp;
+
+    auto command = active_controller_->update(state, reference, controller_params_, dt);
+    if (!command.torque.allFinite() || !std::isfinite(command.collective_thrust)) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "%s produced a non-finite command; publishing level hover fallback.",
+        active_controller_->name().c_str());
+      command.torque.setZero();
+      command.collective_thrust =
+        controller_params_.mass * std::abs(controller_params_.gravity.z());
+    }
+    command.collective_thrust = std::max(0.0, command.collective_thrust);
+
+    if (state.body_rate.norm() > 4.0) {
+      Eigen::Vector4d desired_attitude = command.attitude;
+      desired_attitude.normalize();
+      const double quaternion_dot = std::clamp(
+        std::abs(state.attitude.dot(desired_attitude)), 0.0, 1.0);
+      const double attitude_error_angle = 2.0 * std::acos(quaternion_dot);
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "%s large-rate diagnostic: |Omega|=%.3f rad/s attitude_error=%.3f rad "
+        "Omega=[%.3f %.3f %.3f] Omega_d=[%.3f %.3f %.3f] "
+        "alpha_d=[%.3f %.3f %.3f] tau=[%.3f %.3f %.3f] N*m.",
+        active_controller_->name().c_str(), state.body_rate.norm(), attitude_error_angle,
+        state.body_rate.x(), state.body_rate.y(), state.body_rate.z(),
+        command.desired_body_rate.x(), command.desired_body_rate.y(),
+        command.desired_body_rate.z(), command.desired_angular_acceleration.x(),
+        command.desired_angular_acceleration.y(),
+        command.desired_angular_acceleration.z(), command.torque.x(),
+        command.torque.y(), command.torque.z());
+    }
+
+    const auto normalized = geometric_controller::normalizeWrench(
+      command, controller_params_.mass, normalizedthrust_constant_,
+      normalizedthrust_offset_, normalizedtorque_constant_);
+    if (normalized.saturated) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "%s wrench saturated by PX4 normalized limits: T=%.3f N tau=[%.3f %.3f %.3f] N*m.",
+        active_controller_->name().c_str(), command.collective_thrust,
+        command.torque.x(), command.torque.y(), command.torque.z());
+    }
+
+    const uint64_t timestamp = timestampMicros(stamp);
+    px4_msgs::msg::VehicleThrustSetpoint thrust_message{};
+    thrust_message.xyz = {0.0F, 0.0F, static_cast<float>(-normalized.thrust)};
+    thrust_message.timestamp = timestamp;
+    thrust_message.timestamp_sample = feedback_timestamp_sample;
+    vehicle_thrust_setpoint_publisher_->publish(thrust_message);
+
+    px4_msgs::msg::VehicleTorqueSetpoint torque_message{};
+    torque_message.xyz = {
+      static_cast<float>(normalized.torque.x()),
+      static_cast<float>(normalized.torque.y()),
+      static_cast<float>(normalized.torque.z())};
+    torque_message.xyz_indi_feedback = {0.0F, 0.0F, 0.0F};
+    torque_message.xyz_indi_feedback_valid = false;
+    torque_message.timestamp = timestamp;
+    torque_message.timestamp_sample = feedback_timestamp_sample;
+    vehicle_torque_setpoint_publisher_->publish(torque_message);
   }
 
   void publishTrajectorySetpoint(
@@ -1284,8 +1877,7 @@ private:
     }
 
     msg.yaw = finiteFloatOrNan(sample.yaw);
-    msg.yawspeed = yaw_rate_feedforward_ ? finiteFloatOrNan(sample.yaw_rate) :
-      std::numeric_limits<float>::quiet_NaN();
+    msg.yawspeed = finiteFloatOrNan(sample.yaw_rate);
     msg.timestamp = timestampMicros(stamp);
     trajectory_setpoint_publisher_->publish(msg);
   }
@@ -1342,8 +1934,8 @@ private:
     pose.pose.position.z = position[2];
 
     Quaternion orientation;
-    if (vehicle_odometry_received_) {
-      orientation = px4NedFrdToRosEnuFlu(vehicle_odometry_.q);
+    if (vehicle_attitude_received_) {
+      orientation = px4NedFrdToRosEnuFlu(vehicle_attitude_.q);
     } else {
       orientation = yawToQuaternion(yawNedToEnu(vehicle_local_position_.heading));
     }
@@ -1491,6 +2083,38 @@ private:
   {
     vehicle_local_position_ = *msg;
     local_position_received_ = true;
+
+    const uint64_t timestamp_sample =
+      msg->timestamp_sample > 0 ? msg->timestamp_sample : msg->timestamp;
+    const bool velocity_valid =
+      msg->v_xy_valid && msg->v_z_valid &&
+      std::isfinite(msg->vx) && std::isfinite(msg->vy) && std::isfinite(msg->vz);
+    if (!velocity_valid) {
+      velocity_acceleration_filter_.reset();
+      filtered_velocity_acceleration_valid_ = false;
+      last_velocity_filter_timestamp_sample_ = 0;
+      return;
+    }
+    if (timestamp_sample == 0 ||
+      (last_velocity_filter_timestamp_sample_ > 0 &&
+      timestamp_sample <= last_velocity_filter_timestamp_sample_))
+    {
+      return;
+    }
+
+    double dt = 1.0 / outer_loop_rate_hz_;
+    if (last_velocity_filter_timestamp_sample_ > 0) {
+      dt = std::clamp(
+        static_cast<double>(
+          timestamp_sample - last_velocity_filter_timestamp_sample_) * 1e-6,
+        0.001, 0.1);
+    }
+    last_velocity_filter_timestamp_sample_ = timestamp_sample;
+    filtered_velocity_acceleration_ned_ = velocity_acceleration_filter_.update(
+      Eigen::Vector3d(msg->vx, msg->vy, msg->vz), dt,
+      velocity_acceleration_filter_params_);
+    filtered_velocity_acceleration_valid_ =
+      filtered_velocity_acceleration_ned_.allFinite();
   }
 
   void vehicleOdometryCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
@@ -1499,8 +2123,93 @@ private:
     vehicle_odometry_received_ = true;
   }
 
+  void vehicleAttitudeCallback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
+  {
+    vehicle_attitude_ = *msg;
+    vehicle_attitude_received_ = true;
+  }
+
+  void vehicleControlModeCallback(const px4_msgs::msg::VehicleControlMode::SharedPtr msg)
+  {
+    vehicle_control_mode_ = *msg;
+    vehicle_control_mode_received_ = true;
+    if (controller_mode_transition_pending_ && rosWrenchModeConfirmed()) {
+      controller_mode_transition_pending_ = false;
+      last_controller_sample_timestamp_ = 0;
+      next_controller_sample_timestamp_ = 0;
+      if (active_controller_ && controllerFeedbackValid()) {
+        active_controller_->reset(controllerState());
+      }
+      RCLCPP_INFO(
+        get_logger(),
+        "PX4 wrench mode confirmed; ROS controller state reset and 250 Hz wrench output enabled.");
+    }
+  }
+
+  void vehicleAngularVelocityCallback(
+    const px4_msgs::msg::VehicleAngularVelocity::SharedPtr msg)
+  {
+    vehicle_angular_velocity_ = *msg;
+    vehicle_angular_velocity_received_ = true;
+
+    if (!geometric_controller::isRosController(active_controller_type_) ||
+      !offboard_enabled_ || !controller_reference_received_ ||
+      !shouldPublishSetpoint())
+    {
+      return;
+    }
+
+    const uint64_t sample_timestamp =
+      msg->timestamp_sample > 0 ? msg->timestamp_sample : msg->timestamp;
+    if (sample_timestamp == 0 || sample_timestamp <= last_controller_sample_timestamp_) {
+      return;
+    }
+    if (!feedbackTimestampsAligned(sample_timestamp)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Withholding wrench: PX4 attitude/angular-rate/position timestamps are not aligned.");
+      return;
+    }
+    if (controller_mode_transition_pending_ || !rosWrenchModeConfirmed()) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Withholding wrench until PX4 confirms thrust-and-torque Offboard control mode.");
+      return;
+    }
+
+    const uint64_t requested_period_us = static_cast<uint64_t>(
+      std::max(1.0, std::round(1e6 / inner_loop_rate_hz_)));
+    const uint64_t timestamp_tolerance_us = requested_period_us / 5;
+    if (next_controller_sample_timestamp_ > 0 &&
+      sample_timestamp + timestamp_tolerance_us < next_controller_sample_timestamp_)
+    {
+      return;
+    }
+    if (next_controller_sample_timestamp_ == 0) {
+      next_controller_sample_timestamp_ = sample_timestamp;
+    }
+    do {
+      next_controller_sample_timestamp_ += requested_period_us;
+    } while (next_controller_sample_timestamp_ <= sample_timestamp);
+
+    const auto stamp = now();
+    auto reference = controller_reference_sample_;
+    if (trajectory_started_ || !takeoff_before_trajectory_ || !offboard_enabled_) {
+      const double trajectory_time = std::max(0.0, (stamp - start_time_).seconds());
+      reference = reference_trajectory_.sample(trajectory_time);
+    }
+    publishControllerSetpoint(reference, stamp, sample_timestamp);
+  }
+
   geometric_controller::TrajectoryParameters trajectory_parameters_;
   geometric_controller::ReferenceTrajectory reference_trajectory_;
+  geometric_controller::ControllerParams controller_params_;
+  geometric_controller::VelocityAccelerationFilter velocity_acceleration_filter_;
+  geometric_controller::VelocityAccelerationFilterParams
+    velocity_acceleration_filter_params_;
+  geometric_controller::ControllerType active_controller_type_{
+    geometric_controller::ControllerType::PX4_DIRECT};
+  std::shared_ptr<geometric_controller::ControllerBase> active_controller_;
 
   bool offboard_enabled_{true};
   bool auto_start_{true};
@@ -1509,22 +2218,32 @@ private:
   bool use_start_transition_{true};
   bool velocity_feedforward_{true};
   bool acceleration_feedforward_{true};
-  bool yaw_rate_feedforward_{true};
   int prearm_setpoints_{10};
   double setpoint_rate_hz_{kSetpointRateHzDefault};
+  double outer_loop_rate_hz_{kOuterLoopRateHzDefault};
+  double inner_loop_rate_hz_{kInnerLoopRateHzDefault};
   double heartbeat_rate_hz_{kHeartbeatRateHzDefault};
   double auto_start_retry_period_s_{1.0};
   double start_transition_duration_s_{4.0};
   double takeoff_position_tolerance_{0.25};
   double takeoff_velocity_tolerance_{0.5};
   std::string setpoint_level_{"position"};
+  double normalizedthrust_constant_{0.022058823529};
+  double normalizedthrust_offset_{0.0};
+  Eigen::Vector3d normalizedtorque_constant_{
+    Eigen::Vector3d(0.319957823650, 0.319957823650, 1.962568474088)};
 
   std::string offboard_control_mode_topic_;
   std::string trajectory_setpoint_topic_;
+  std::string vehicle_thrust_setpoint_topic_;
+  std::string vehicle_torque_setpoint_topic_;
   std::string vehicle_command_topic_;
   std::string vehicle_status_topic_;
   std::string vehicle_local_position_topic_;
   std::string vehicle_odometry_topic_;
+  std::string vehicle_attitude_topic_;
+  std::string vehicle_angular_velocity_topic_;
+  std::string vehicle_control_mode_topic_;
   std::string visualization_path_topic_;
   std::string visualization_pose_topic_;
   std::string visualization_vehicle_pose_topic_;
@@ -1547,6 +2266,10 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
+  rclcpp::Publisher<px4_msgs::msg::VehicleThrustSetpoint>::SharedPtr
+    vehicle_thrust_setpoint_publisher_;
+  rclcpp::Publisher<px4_msgs::msg::VehicleTorqueSetpoint>::SharedPtr
+    vehicle_torque_setpoint_publisher_;
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr reference_path_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr reference_pose_publisher_;
@@ -1557,16 +2280,33 @@ private:
     vehicle_local_position_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr
     vehicle_odometry_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr
+    vehicle_attitude_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleAngularVelocity>::SharedPtr
+    vehicle_angular_velocity_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleControlMode>::SharedPtr
+    vehicle_control_mode_subscriber_;
 
   px4_msgs::msg::VehicleStatus vehicle_status_{};
   px4_msgs::msg::VehicleLocalPosition vehicle_local_position_{};
   px4_msgs::msg::VehicleOdometry vehicle_odometry_{};
+  px4_msgs::msg::VehicleAttitude vehicle_attitude_{};
+  px4_msgs::msg::VehicleAngularVelocity vehicle_angular_velocity_{};
+  px4_msgs::msg::VehicleControlMode vehicle_control_mode_{};
+  geometric_controller::TrajectorySample controller_reference_sample_{};
   std::vector<geometry_msgs::msg::PoseStamped> vehicle_path_;
   bool status_received_{false};
   bool local_position_received_{false};
   bool vehicle_odometry_received_{false};
+  bool vehicle_attitude_received_{false};
+  bool vehicle_angular_velocity_received_{false};
+  bool vehicle_control_mode_received_{false};
+  bool controller_mode_transition_pending_{false};
+  bool controller_reference_received_{false};
   bool parameters_pending_{false};
   bool trajectory_reset_pending_{false};
+  bool controller_reset_pending_{false};
+  bool velocity_acceleration_filter_reset_pending_{false};
   bool trajectory_started_{false};
   bool start_transition_active_{false};
   bool start_transition_finished_{false};
@@ -1584,6 +2324,12 @@ private:
   rclcpp::Time start_transition_start_time_;
   uint64_t offboard_heartbeat_counter_{0};
   rclcpp::Time start_time_;
+  rclcpp::Time last_controller_update_time_;
+  uint64_t last_controller_sample_timestamp_{0};
+  uint64_t next_controller_sample_timestamp_{0};
+  uint64_t last_velocity_filter_timestamp_sample_{0};
+  Eigen::Vector3d filtered_velocity_acceleration_ned_{Eigen::Vector3d::Zero()};
+  bool filtered_velocity_acceleration_valid_{false};
 };
 
 int main(int argc, char * argv[])

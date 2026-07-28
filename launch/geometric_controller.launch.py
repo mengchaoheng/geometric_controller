@@ -27,6 +27,9 @@ from launch_ros.actions import Node
 def generate_launch_description():
     package_share = get_package_share_directory('geometric_controller')
     default_params = os.path.join(package_share, 'config', 'controller.yaml')
+    default_vehicle_params = os.path.join(
+        package_share, 'config', 'vehicles', 'iris.yaml'
+    )
     default_rviz = os.path.join(package_share, 'rviz', 'geometric_controller.rviz')
 
     return LaunchDescription([
@@ -39,6 +42,11 @@ def generate_launch_description():
             'launch_rviz',
             default_value='true',
             description='Start RViz2 with the package visualization config.',
+        ),
+        DeclareLaunchArgument(
+            'vehicle_param_file',
+            default_value=default_vehicle_params,
+            description='Vehicle mass, inertia, and PX4 normalization constants.',
         ),
         DeclareLaunchArgument(
             'launch_tuning_panel',
@@ -55,7 +63,10 @@ def generate_launch_description():
             executable='trajectory_offboard_node',
             name='trajectory_offboard_node',
             output='screen',
-            parameters=[LaunchConfiguration('param_file')],
+            parameters=[
+                LaunchConfiguration('param_file'),
+                LaunchConfiguration('vehicle_param_file'),
+            ],
         ),
         Node(
             condition=IfCondition(LaunchConfiguration('launch_rviz')),

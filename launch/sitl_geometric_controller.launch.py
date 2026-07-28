@@ -58,6 +58,7 @@ def launch_setup(context):
             PythonLaunchDescriptionSource(controller_launch),
             launch_arguments={
                 'param_file': LaunchConfiguration('param_file'),
+                'vehicle_param_file': LaunchConfiguration('vehicle_param_file'),
                 'launch_rviz': LaunchConfiguration('launch_rviz'),
                 'launch_tuning_panel': LaunchConfiguration('launch_tuning_panel'),
                 'rviz_config': LaunchConfiguration('rviz_config'),
@@ -80,13 +81,18 @@ def launch_setup(context):
 def generate_launch_description():
     package_share = get_package_share_directory('geometric_controller')
     default_params = os.path.join(package_share, 'config', 'controller.yaml')
+    default_vehicle_params = os.path.join(
+        package_share, 'config', 'vehicles', 'iris.yaml'
+    )
     default_rviz = os.path.join(package_share, 'rviz', 'geometric_controller.rviz')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'px4_dir',
             default_value='~/PX4-Autopilot',
-            description='PX4-Autopilot checkout path. Override with px4_dir:=/path/to/PX4-Autopilot.',
+            description=(
+                'PX4-Autopilot checkout path; df-main is the Iris reference.'
+            ),
         ),
         DeclareLaunchArgument(
             'px4_model',
@@ -112,6 +118,11 @@ def generate_launch_description():
             'param_file',
             default_value=default_params,
             description='Main YAML parameter file for trajectory_offboard_node.',
+        ),
+        DeclareLaunchArgument(
+            'vehicle_param_file',
+            default_value=default_vehicle_params,
+            description='Vehicle mass, inertia, and PX4 normalization constants.',
         ),
         DeclareLaunchArgument(
             'launch_rviz',
