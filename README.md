@@ -80,7 +80,7 @@ Regenerate and rebuild PX4 after changing DDS topics or uORB messages:
 
 ```bash
 cd /path/to/DuctedFanUAV-Autopilot
-DONT_RUN=1 make px4_sitl gz_iris
+make px4_sitl
 ```
 
 Use the official `px4_msgs release/1.18` tree without controller-specific

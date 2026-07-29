@@ -47,12 +47,12 @@ trajectory_offboard_node:
     drag_dy: 0.0
     drag_dz: 0.0
     max_acc: 45.0
-    Kp_x: 10.0
-    Kp_y: 10.0
-    Kp_z: 10.0
-    Kv_x: 6.0
-    Kv_y: 6.0
-    Kv_z: 6.0
+    Kp_x: 30.0
+    Kp_y: 30.0
+    Kp_z: 20.0
+    Kv_x: 10.0
+    Kv_y: 10.0
+    Kv_z: 10.0
     KR_r: 150.0
     KR_p: 150.0
     KR_y: 80.0
@@ -62,7 +62,7 @@ trajectory_offboard_node:
 
     # Same convention as mavros_controllers:
     # normalizedthrust_constant = mass / total_max_thrust.
-    normalizedthrust_constant: 0.022058823529
+    normalizedthrust_constant: 0.020
     normalizedthrust_offset: 0.0
     normalizedtorque_constant_r: 0.319957823650
     normalizedtorque_constant_p: 0.319957823650
@@ -91,7 +91,7 @@ trajectory_offboard_node:
       frame_id: map
       ned_to_enu: true
       preview_points: 240
-      path_publish_period_s: 0.02
+      path_publish_period_s: 0.1
       vehicle_path_max_points: 30
       vehicle_path_min_distance_m: 0.05
 

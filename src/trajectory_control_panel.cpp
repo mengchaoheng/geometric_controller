@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -247,10 +248,12 @@ private:
     omega_slider_->setSingleStep(1);
     omega_slider_->setPageStep(10);
     omega_spin_ = new QDoubleSpinBox();
-    omega_spin_->setRange(0.01, 4.0);
+    omega_spin_->setRange(
+      std::numeric_limits<double>::lowest(), std::numeric_limits<double>::max());
     omega_spin_->setSingleStep(0.01);
     omega_spin_->setDecimals(3);
     omega_spin_->setSuffix(" rad/s");
+    omega_spin_->setKeyboardTracking(false);
     omega_spin_->setValue(0.5);
     omega_slider_->setValue(omegaToSlider(0.5));
 
@@ -267,7 +270,12 @@ private:
           const QSignalBlocker blocker(omega_spin_);
           omega_spin_->setValue(value);
         }
-        setDoubleParameter("omega_value", value);
+    });
+
+    QObject::connect(omega_slider_, &QSlider::sliderReleased, [this]() {
+        if (!updating_ui_) {
+          setDoubleParameter("omega_value", sliderToOmega(omega_slider_->value()));
+        }
     });
 
     QObject::connect(
@@ -277,9 +285,14 @@ private:
         }
         {
           const QSignalBlocker blocker(omega_slider_);
-          omega_slider_->setValue(omegaToSlider(value));
+          omega_slider_->setValue(omegaToSlider(std::clamp(value, 0.01, 4.0)));
         }
-        setDoubleParameter("omega_value", value);
+      });
+
+    QObject::connect(omega_spin_, &QDoubleSpinBox::editingFinished, [this]() {
+        if (!updating_ui_) {
+          setDoubleParameter("omega_value", omega_spin_->value());
+        }
       });
   }
 
@@ -407,23 +420,26 @@ private:
 
   QDoubleSpinBox * addDouble(
     QFormLayout * form, const QString & label, const std::string & parameter_name,
-    double default_value, double min, double max, double step, int decimals, const QString & suffix)
+    double default_value, double /* min */, double /* max */, double step, int decimals,
+    const QString & suffix)
   {
     registerParameter(parameter_name);
 
     auto * spin = new QDoubleSpinBox();
-    spin->setRange(min, max);
+    spin->setRange(
+      std::numeric_limits<double>::lowest(), std::numeric_limits<double>::max());
     spin->setSingleStep(step);
     spin->setDecimals(decimals);
     spin->setSuffix(suffix);
+    spin->setKeyboardTracking(false);
     spin->setValue(default_value);
     double_controls_[parameter_name] = spin;
     form->addRow(label, spin);
 
-    QObject::connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-      [this, parameter_name](double value) {
+    QObject::connect(spin, &QDoubleSpinBox::editingFinished,
+      [this, parameter_name, spin]() {
         if (!updating_ui_) {
-          setDoubleParameter(parameter_name, value);
+          setDoubleParameter(parameter_name, spin->value());
         }
     });
 
@@ -582,11 +598,10 @@ private:
 
   void setOmegaUi(double value)
   {
-    const double clamped = std::clamp(value, 0.01, 4.0);
     const QSignalBlocker spin_blocker(omega_spin_);
     const QSignalBlocker slider_blocker(omega_slider_);
-    omega_spin_->setValue(clamped);
-    omega_slider_->setValue(omegaToSlider(clamped));
+    omega_spin_->setValue(value);
+    omega_slider_->setValue(omegaToSlider(std::clamp(value, 0.01, 4.0)));
   }
 
   void setDoubleParameter(const std::string & name, double value)

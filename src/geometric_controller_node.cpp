@@ -36,8 +36,6 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
-#include <rcl_interfaces/msg/floating_point_range.hpp>
-#include <rcl_interfaces/msg/integer_range.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -51,8 +49,6 @@ namespace
 {
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr int64_t kMavlinkIdMin = 1;
-constexpr int64_t kMavlinkIdMax = 255;
 constexpr float kMavModeFlagCustomModeEnabled = 1.0F;
 constexpr float kPx4CustomMainModeOffboard = 6.0F;
 constexpr float kVehicleCommandArm = 1.0F;
@@ -183,29 +179,15 @@ rcl_interfaces::msg::ParameterDescriptor describeParameter(const std::string & d
 }
 
 rcl_interfaces::msg::ParameterDescriptor describeDouble(
-  const std::string & description, double min, double max, double /* step */)
+  const std::string & description, double /* min */, double /* max */, double /* step */)
 {
-  auto descriptor = describeParameter(description);
-  rcl_interfaces::msg::FloatingPointRange range;
-  range.from_value = min;
-  range.to_value = max;
-  // A nonzero FloatingPointRange step validates against a discrete grid.
-  // These controller parameters are continuous; UI increments live in the panel.
-  range.step = 0.0;
-  descriptor.floating_point_range.push_back(range);
-  return descriptor;
+  return describeParameter(description);
 }
 
 rcl_interfaces::msg::ParameterDescriptor describeInteger(
-  const std::string & description, int64_t min, int64_t max, uint64_t step)
+  const std::string & description, int64_t /* min */, int64_t /* max */, uint64_t /* step */)
 {
-  auto descriptor = describeParameter(description);
-  rcl_interfaces::msg::IntegerRange range;
-  range.from_value = min;
-  range.to_value = max;
-  range.step = step;
-  descriptor.integer_range.push_back(range);
-  return descriptor;
+  return describeParameter(description);
 }
 
 std::array<double, 6> computeQuinticCoefficients(
@@ -578,31 +560,24 @@ private:
     auto_start_ = get_parameter("offboard.auto_start").as_bool();
     arm_on_start_ = get_parameter("offboard.arm_on_start").as_bool();
     prearm_setpoints_ =
-      static_cast<int>(std::max<int64_t>(0, get_parameter("offboard.prearm_setpoints").as_int()));
+      static_cast<int>(get_parameter("offboard.prearm_setpoints").as_int());
     const double legacy_publish_rate_hz = get_parameter("offboard.publish_rate_hz").as_double();
     const double requested_setpoint_rate_hz = legacy_publish_rate_hz > 0.0 ?
       legacy_publish_rate_hz : get_parameter("offboard.setpoint_rate_hz").as_double();
-    setpoint_rate_hz_ =
-      std::clamp(requested_setpoint_rate_hz, kSetpointRateHzMin, kSetpointRateHzMax);
-    outer_loop_rate_hz_ = std::clamp(
-      get_parameter("outer_loop_rate_hz").as_double(),
-      kOuterLoopRateHzMin, kOuterLoopRateHzMax);
-    inner_loop_rate_hz_ = std::clamp(
-      get_parameter("inner_loop_rate_hz").as_double(),
-      kInnerLoopRateHzMin, kInnerLoopRateHzMax);
-    heartbeat_rate_hz_ = std::clamp(
-      get_parameter("offboard.heartbeat_rate_hz").as_double(), kHeartbeatRateHzMin,
-      kHeartbeatRateHzMax);
+    setpoint_rate_hz_ = requested_setpoint_rate_hz;
+    outer_loop_rate_hz_ = get_parameter("outer_loop_rate_hz").as_double();
+    inner_loop_rate_hz_ = get_parameter("inner_loop_rate_hz").as_double();
+    heartbeat_rate_hz_ = get_parameter("offboard.heartbeat_rate_hz").as_double();
     auto_start_retry_period_s_ =
-      std::max(0.2, get_parameter("offboard.auto_start_retry_period_s").as_double());
+      get_parameter("offboard.auto_start_retry_period_s").as_double();
     takeoff_before_trajectory_ = get_parameter("offboard.takeoff_before_trajectory").as_bool();
     use_start_transition_ = get_parameter("offboard.use_start_transition").as_bool();
     start_transition_duration_s_ =
-      std::max(0.5, get_parameter("offboard.start_transition_duration_s").as_double());
+      get_parameter("offboard.start_transition_duration_s").as_double();
     takeoff_position_tolerance_ =
-      std::max(0.01, get_parameter("offboard.takeoff_position_tolerance").as_double());
+      get_parameter("offboard.takeoff_position_tolerance").as_double();
     takeoff_velocity_tolerance_ =
-      std::max(0.01, get_parameter("offboard.takeoff_velocity_tolerance").as_double());
+      get_parameter("offboard.takeoff_velocity_tolerance").as_double();
 
     setpoint_level_ = normalizeSetpointLevel(get_parameter("setpoint.level").as_string());
     velocity_feedforward_ = get_parameter("setpoint.velocity_feedforward").as_bool();
@@ -669,18 +644,10 @@ private:
     vehicle_angular_velocity_topic_ =
       get_parameter("px4.vehicle_angular_velocity_topic").as_string();
     vehicle_control_mode_topic_ = get_parameter("px4.vehicle_control_mode_topic").as_string();
-    target_system_ = static_cast<uint8_t>(
-      std::clamp<int64_t>(get_parameter("px4.target_system").as_int(), kMavlinkIdMin,
-      kMavlinkIdMax));
-    target_component_ = static_cast<uint8_t>(
-      std::clamp<int64_t>(get_parameter("px4.target_component").as_int(), kMavlinkIdMin,
-      kMavlinkIdMax));
-    source_system_ = static_cast<uint8_t>(
-      std::clamp<int64_t>(get_parameter("px4.source_system").as_int(), kMavlinkIdMin,
-      kMavlinkIdMax));
-    source_component_ = static_cast<uint8_t>(
-      std::clamp<int64_t>(get_parameter("px4.source_component").as_int(), kMavlinkIdMin,
-      kMavlinkIdMax));
+    target_system_ = static_cast<uint8_t>(get_parameter("px4.target_system").as_int());
+    target_component_ = static_cast<uint8_t>(get_parameter("px4.target_component").as_int());
+    source_system_ = static_cast<uint8_t>(get_parameter("px4.source_system").as_int());
+    source_component_ = static_cast<uint8_t>(get_parameter("px4.source_component").as_int());
 
     visualization_path_topic_ = get_parameter("visualization.path_topic").as_string();
     visualization_pose_topic_ = get_parameter("visualization.current_pose_topic").as_string();
@@ -691,21 +658,19 @@ private:
     visualization_frame_id_ = get_parameter("visualization.frame_id").as_string();
     visualization_ned_to_enu_ = get_parameter("visualization.ned_to_enu").as_bool();
     preview_points_ =
-      static_cast<int>(std::max<int64_t>(2,
-      get_parameter("visualization.preview_points").as_int()));
+      static_cast<int>(get_parameter("visualization.preview_points").as_int());
     path_publish_period_s_ =
-      std::max(0.05, get_parameter("visualization.path_publish_period_s").as_double());
+      get_parameter("visualization.path_publish_period_s").as_double();
     vehicle_path_max_points_ =
-      static_cast<int>(std::max<int64_t>(0,
-      get_parameter("visualization.vehicle_path_max_points").as_int()));
+      static_cast<int>(get_parameter("visualization.vehicle_path_max_points").as_int());
     vehicle_path_min_distance_m_ =
-      std::max(0.0, get_parameter("visualization.vehicle_path_min_distance_m").as_double());
+      get_parameter("visualization.vehicle_path_min_distance_m").as_double();
     trimVehiclePath();
 
     const auto traj_name_from_param =
       geometric_controller::normalizeTrajectoryType(get_parameter("trajName").as_string());
-    const int trajectory_type_from_param = static_cast<int>(
-      std::clamp<int64_t>(get_parameter("trajectory_type").as_int(), 1, 6));
+    const int trajectory_type_from_param =
+      static_cast<int>(get_parameter("trajectory_type").as_int());
     if (prefer_trajectory_type_) {
       trajectory_type_ = trajectory_type_from_param;
       trajectory_parameters_.traj_name =
@@ -903,136 +868,6 @@ private:
     for (const auto & parameter : parameters) {
       const auto & name = parameter.get_name();
 
-      if (name == "trajName" && parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
-        !geometric_controller::isSupportedTrajectoryType(parameter.as_string()))
-      {
-        result.successful = false;
-        result.reason = "Unsupported trajName";
-        return result;
-      }
-      if (name == "trajectory_type" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
-        (parameter.as_int() < 1 || parameter.as_int() > 6))
-      {
-        result.successful = false;
-        result.reason = "trajectory_type must be in [1, 6]";
-        return result;
-      }
-      if (name == "setpoint.level" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING &&
-        normalizeSetpointLevel(parameter.as_string()) == "invalid")
-      {
-        result.successful = false;
-        result.reason = "setpoint.level must be position, velocity, or acceleration";
-        return result;
-      }
-      if (name == "controller_type" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
-        (parameter.as_int() < 0 || parameter.as_int() > 8))
-      {
-        result.successful = false;
-        result.reason = "controller_type must be in [0, 8]";
-        return result;
-      }
-      if (name == "ctrl_mode" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
-        (parameter.as_int() < geometric_controller::kErrorQuaternion ||
-        parameter.as_int() > geometric_controller::kErrorGeometric))
-      {
-        result.successful = false;
-        result.reason = "ctrl_mode must be 1 (quaternion) or 2 (geometric)";
-        return result;
-      }
-      if ((name == "px4.target_system" || name == "px4.target_component" ||
-        name == "px4.source_system" || name == "px4.source_component") &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER &&
-        (parameter.as_int() < kMavlinkIdMin || parameter.as_int() > kMavlinkIdMax))
-      {
-        result.successful = false;
-        result.reason = name + " must be in [1, 255]";
-        return result;
-      }
-      if ((name == "offboard.auto_start_retry_period_s" ||
-        name == "offboard.start_transition_duration_s" || name == "omega_value") &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        parameter.as_double() <= 0.0)
-      {
-        result.successful = false;
-        result.reason = name + " must be positive";
-        return result;
-      }
-      if ((name == "mass" || name == "normalizedthrust_constant" ||
-        name == "normalizedtorque_constant_r" ||
-        name == "normalizedtorque_constant_p" ||
-        name == "normalizedtorque_constant_y") &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        (!std::isfinite(parameter.as_double()) || parameter.as_double() <= 0.0))
-      {
-        result.successful = false;
-        result.reason = name + " must be finite and positive";
-        return result;
-      }
-      if (name == "normalizedthrust_offset" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), -1.0, 1.0))
-      {
-        result.successful = false;
-        result.reason = "normalizedthrust_offset must be in [-1, 1]";
-        return result;
-      }
-      if (name == "offboard.setpoint_rate_hz" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), kSetpointRateHzMin, kSetpointRateHzMax))
-      {
-        result.successful = false;
-        result.reason = "offboard.setpoint_rate_hz must be in [50, 250]";
-        return result;
-      }
-      if (name == "outer_loop_rate_hz" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), kOuterLoopRateHzMin, kOuterLoopRateHzMax))
-      {
-        result.successful = false;
-        result.reason = "outer_loop_rate_hz must be in [10, 250]";
-        return result;
-      }
-      if (name == "inner_loop_rate_hz" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), kInnerLoopRateHzMin, kInnerLoopRateHzMax))
-      {
-        result.successful = false;
-        result.reason = "inner_loop_rate_hz must be in [50, 250]";
-        return result;
-      }
-      if (name == "offboard.heartbeat_rate_hz" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), kHeartbeatRateHzMin, kHeartbeatRateHzMax))
-      {
-        result.successful = false;
-        result.reason = "offboard.heartbeat_rate_hz must be in [3, 10]";
-        return result;
-      }
-      if (name == "offboard.publish_rate_hz" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
-      {
-        const double rate_hz = parameter.as_double();
-        if (rate_hz < 0.0 ||
-          (rate_hz > 0.0 && !isInClosedRange(rate_hz, kSetpointRateHzMin, kSetpointRateHzMax)))
-        {
-          result.successful = false;
-          result.reason = "offboard.publish_rate_hz must be 0 or in [50, 250]";
-          return result;
-        }
-      }
-      if (startsWith(name, "indi_velocity_") &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE &&
-        !isInClosedRange(parameter.as_double(), 0.0, 50.0))
-      {
-        result.successful = false;
-        result.reason = name + " must be in [0, 50]";
-        return result;
-      }
-
       if (parameterAffectsTrajectoryRestart(name)) {
         trajectory_reset_pending_ = true;
       }
@@ -1101,11 +936,6 @@ private:
       return "acceleration";
     }
     return "invalid";
-  }
-
-  static bool isInClosedRange(double value, double min, double max)
-  {
-    return std::isfinite(value) && value >= min && value <= max;
   }
 
   void applyPendingParameters()

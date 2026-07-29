@@ -77,7 +77,7 @@ CA_ROTORx_KM = ±0.0157 m
 
 ```bash
 cd /path/to/DuctedFanUAV-Autopilot
-DONT_RUN=1 make px4_sitl gz_iris
+make px4_sitl
 ```
 
 直接使用未经控制器专用修改的官方 `px4_msgs release/1.18`。PX4 提交
