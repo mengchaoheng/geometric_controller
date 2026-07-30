@@ -17,9 +17,10 @@ trajectory_offboard_node:
       takeoff_position_tolerance: 0.25
       takeoff_velocity_tolerance: 0.5
 
-    # gz_iris uORB runtime rates are about 125 Hz for full EKF/local position,
-    # about 200-250 Hz for attitude, and 250 Hz for angular velocity.
-    outer_loop_rate_hz: 125.0
+    # PX4 callbacks cache their newest sample. The reference/translational
+    # layer uses a fixed timer; fresh angular-velocity samples trigger the
+    # wrench calculation up to inner_loop_rate_hz.
+    outer_loop_rate_hz: 100.0
     inner_loop_rate_hz: 250.0
 
     setpoint:
@@ -27,26 +28,19 @@ trajectory_offboard_node:
       velocity_feedforward: true
       acceleration_feedforward: true
 
-    # 8 keeps the existing PX4 position-controller path. Types 0-7 run the
-    # complete force/moment controller in ROS 2 and bypass PX4 attitude/rate control.
-    controller_type: 8
+    # 6 keeps the PX4 position-controller path. Types 0-5 publish a ROS wrench.
+    controller_type: 6
     ctrl_mode: 1
     gravity: 9.81
     mass: 0.75
     inertia_x: 0.0025
     inertia_y: 0.0021
     inertia_z: 0.0043
-    indi_filter_cutoff_hz: 30.0
-    # Match df-main mc_pos_control: MPC_VEL_LP=0, MPC_VEL_NF_FRQ=0,
-    # MPC_VEL_NF_BW=5 and MPC_VELD_LP=5.
-    indi_velocity_lpf_hz: 0.0
-    indi_velocity_notch_hz: 0.0
-    indi_velocity_notch_bandwidth_hz: 5.0
-    indi_velocity_derivative_lpf_hz: 5.0
+    # Complete Geometric INDI: main.tex Eq. (55), (60), and (61).
+    indi_acceleration_enabled: true
     drag_dx: 0.0
     drag_dy: 0.0
     drag_dz: 0.0
-    max_acc: 45.0
     Kp_x: 30.0
     Kp_y: 30.0
     Kp_z: 20.0
@@ -59,7 +53,21 @@ trajectory_offboard_node:
     KOmega_r: 50.0
     KOmega_p: 50.0
     KOmega_y: 3.0
-
+    # main.m Geometric INDI gains, independent of the other controllers.
+    indi_Kp_x: 10.0
+    indi_Kp_y: 10.0
+    indi_Kp_z: 10.0
+    indi_Kv_x: 6.0
+    indi_Kv_y: 6.0
+    indi_Kv_z: 6.0
+    indi_Ktheta_r: 150.0
+    indi_Ktheta_p: 150.0
+    indi_Ktheta_y: 3.0
+    indi_Komega_r: 20.0
+    indi_Komega_p: 20.0
+    indi_Komega_y: 8.0
+    # Common yaw-torque output filter for the direct external-wrench path.
+    yaw_torque_cutoff_hz: 1.0
     # Same convention as mavros_controllers:
     # normalizedthrust_constant = mass / total_max_thrust.
     normalizedthrust_constant: 0.020
@@ -74,10 +82,10 @@ trajectory_offboard_node:
       vehicle_thrust_setpoint_topic: /fmu/in/vehicle_thrust_setpoint
       vehicle_torque_setpoint_topic: /fmu/in/vehicle_torque_setpoint
       vehicle_command_topic: /fmu/in/vehicle_command
-      vehicle_odometry_topic: /fmu/out/vehicle_odometry
+      acceleration_indi_feedback_topic: /fmu/out/vehicle_acceleration_indi_feedback
+      allocation_value_topic: /fmu/out/allocation_value
       vehicle_attitude_topic: /fmu/out/vehicle_attitude
       vehicle_angular_velocity_topic: /fmu/out/vehicle_angular_velocity
-      vehicle_control_mode_topic: /fmu/out/vehicle_control_mode
       target_system: 1
       target_component: 1
       source_system: 1

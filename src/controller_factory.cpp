@@ -23,7 +23,6 @@
 #include "geometric_controller/controllers/main_johnson_controller.hpp"
 #include "geometric_controller/controllers/main_lee_controller.hpp"
 #include "geometric_controller/controllers/main_sun_dfbc_controller.hpp"
-#include "geometric_controller/controllers/main_tal_controller.hpp"
 
 namespace geometric_controller
 {
@@ -48,10 +47,6 @@ std::string controllerTypeName(ControllerType type)
       return "main_johnson";
     case ControllerType::MAIN_SUN_DFBC:
       return "main_sun_dfbc";
-    case ControllerType::MAIN_SUN_DFBC_INDI:
-      return "main_sun_dfbc_indi";
-    case ControllerType::MAIN_TAL:
-      return "main_tal";
     case ControllerType::MAIN_GEOMETRIC_INDI:
       return "main_geometric_indi";
     case ControllerType::PX4_DIRECT:
@@ -77,11 +72,7 @@ std::shared_ptr<ControllerBase> makeController(ControllerType type)
     case ControllerType::MAIN_JOHNSON:
       return std::make_shared<MainJohnsonController>();
     case ControllerType::MAIN_SUN_DFBC:
-      return std::make_shared<MainSunDFBCController>(false);
-    case ControllerType::MAIN_SUN_DFBC_INDI:
-      return std::make_shared<MainSunDFBCController>(true);
-    case ControllerType::MAIN_TAL:
-      return std::make_shared<MainTalController>();
+      return std::make_shared<MainSunDFBCController>();
     case ControllerType::MAIN_GEOMETRIC_INDI:
       return std::make_shared<MainGeometricINDIController>();
     case ControllerType::PX4_DIRECT:
@@ -98,8 +89,6 @@ const std::vector<std::string> & supportedControllerTypes()
     "main_lee",
     "main_johnson",
     "main_sun_dfbc",
-    "main_sun_dfbc_indi",
-    "main_tal",
     "main_geometric_indi",
     "px4_direct",
   };

@@ -18,6 +18,8 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include "geometric_controller/controllers/controller_types.hpp"
 
@@ -27,6 +29,8 @@ namespace geometric_controller
 struct NormalizedWrench
 {
   Eigen::Vector3d torque = Eigen::Vector3d::Zero();
+  Eigen::Vector3d indi_torque_feedback = Eigen::Vector3d::Zero();
+  bool indi_torque_feedback_valid = false;
   double thrust = 0.0;
   double requested_thrust = 0.0;
   bool saturated = false;
@@ -47,6 +51,30 @@ inline NormalizedWrench normalizeWrench(
     result.requested_thrust<0.0 || result.requested_thrust>1.0;
   result.torque = result.torque.cwiseMax(-1.0).cwiseMin(1.0);
   result.thrust = std::clamp(result.requested_thrust, 0.0, 1.0);
+  if (command.indi_torque_feedback_valid &&
+    command.indi_torque_feedback.allFinite())
+  {
+    result.indi_torque_feedback_valid = true;
+    // Controller quantities are physical [N*m], whereas both PX4 torque
+    // fields are dimensionless. The caller supplies the configured, fixed
+    // D_tau. Apply it to both components before reproducing the final message
+    // clipping ratio:
+    // s = D_tau*tau_c, s_H = D_tau*tau_H,
+    // s_H,out = s_H * s_out / s.
+    const Eigen::Vector3d unprocessed_torque =
+      normalizedtorque_constant.asDiagonal() * command.torque;
+    const Eigen::Vector3d unprocessed_indi_feedback =
+      normalizedtorque_constant.asDiagonal() * command.indi_torque_feedback;
+    for (int axis = 0; axis < 3; ++axis) {
+      // Match PX4 mc_rate_control: preserve the INDI feedback fraction when
+      // the final torque setpoint has been scaled or clipped.
+      result.indi_torque_feedback[axis] =
+        std::abs(unprocessed_torque[axis]) > std::numeric_limits<float>::epsilon() ?
+        unprocessed_indi_feedback[axis] * result.torque[axis] /
+        unprocessed_torque[axis] : 0.0;
+    }
+  }
+
   return result;
 }
 

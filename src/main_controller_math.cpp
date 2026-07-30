@@ -121,21 +121,6 @@ Eigen::Vector4d matrixToQuaternion(const Eigen::Matrix3d & R)
   return rot2Quaternion(R);
 }
 
-Eigen::Vector4d attitudeFromSpecificForce(const Eigen::Vector3d & specific_force, double yaw)
-{
-  Eigen::Vector3d zb_des, yb_des, xb_des, proj_xb_des;
-  Eigen::Matrix3d rotmat;
-
-  proj_xb_des << std::cos(yaw), std::sin(yaw), 0.0;
-  zb_des = specific_force / specific_force.norm();
-  yb_des = zb_des.cross(proj_xb_des) / (zb_des.cross(proj_xb_des)).norm();
-  xb_des = yb_des.cross(zb_des) / (yb_des.cross(zb_des)).norm();
-
-  rotmat << xb_des(0), yb_des(0), zb_des(0), xb_des(1), yb_des(1), zb_des(1), xb_des(2), yb_des(2),
-    zb_des(2);
-  return matrixToQuaternion(rotmat);
-}
-
 Eigen::Matrix3d attitudeFromUnitBodyZAndHeading(
   const Eigen::Vector3d & b3d,
   const Eigen::Vector3d & xC)
@@ -209,105 +194,6 @@ AttitudeDerivatives attitudeDerivativesFromUnitBodyZAndHeading(
   return result;
 }
 
-Eigen::Vector3d saturatedFeedbackAcceleration(
-  const Eigen::Vector3d & feedback,
-  double max_feedback_acc)
-{
-  if (feedback.norm() > max_feedback_acc) {
-    return (max_feedback_acc / feedback.norm()) * feedback;
-  }
-  return feedback;
-}
-
-Eigen::Vector3d outerLoopAcceleration(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params)
-{
-  const Eigen::Vector3d ep = reference.position - state.position;
-  const Eigen::Vector3d ev = reference.velocity - state.velocity;
-  const Eigen::Vector3d a_fb =
-    saturatedFeedbackAcceleration(params.Kp.asDiagonal() * ep + params.Kv.asDiagonal() * ev,
-                                    params.max_feedback_acc);
-  return reference.acceleration + a_fb;
-}
-
-Eigen::Vector3d closedLoopSpecificForceDerivative(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double thrust_accel)
-{
-  if (!std::isfinite(thrust_accel) || !state.attitude.allFinite() || state.attitude.norm() < 1e-6) {
-    return reference.jerk;
-  }
-
-  const Eigen::Matrix3d R = quat2RotMatrix(state.attitude / state.attitude.norm());
-  const Eigen::Vector3d predicted_acc = params.gravity + thrust_accel * R.col(2);
-  return params.Kp.asDiagonal() * (reference.velocity - state.velocity) +
-         params.Kv.asDiagonal() * (reference.acceleration - predicted_acc) + reference.jerk;
-}
-
-Eigen::Vector3d closedLoopSpecificForceSecondDerivative(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double thrust_accel,
-  const Eigen::Vector3d & specific_force_dot)
-{
-  const Eigen::Matrix3d R = quat2RotMatrix(state.attitude / state.attitude.norm());
-  const Eigen::Vector3d b3 = R.col(2);
-  const Eigen::Vector3d b3_dot = R * hat(state.body_rate) * Eigen::Vector3d::UnitZ();
-  const double thrust_accel_dot = b3.dot(specific_force_dot);
-  const Eigen::Vector3d predicted_acc = params.gravity + thrust_accel * b3;
-  const Eigen::Vector3d predicted_acc_dot = thrust_accel_dot * b3 + thrust_accel * b3_dot;
-  return params.Kp.asDiagonal() * (reference.acceleration - predicted_acc) +
-         params.Kv.asDiagonal() * (reference.jerk - predicted_acc_dot) + reference.snap;
-}
-
-Eigen::Vector3d referenceBodyRateFromForce(
-  const Eigen::Vector3d & specific_force,
-  const Eigen::Vector3d & specific_force_dot, double yaw,
-  double yaw_rate)
-{
-  if (!specific_force.allFinite() || !specific_force_dot.allFinite()) {
-    return Eigen::Vector3d::Zero();
-  }
-
-  const double force_norm = specific_force.norm();
-  if (force_norm < 1e-6) {
-    return Eigen::Vector3d::Zero();
-  }
-
-  const Eigen::Vector3d b3d = specific_force / force_norm;
-  const Eigen::Vector3d b3d_dot =
-    (Eigen::Matrix3d::Identity() - b3d * b3d.transpose()) * specific_force_dot / force_norm;
-  const Eigen::Vector3d heading(std::cos(yaw), std::sin(yaw), 0.0);
-  const Eigen::Vector3d heading_dot = yaw_rate * Eigen::Vector3d(-std::sin(yaw), std::cos(yaw),
-        0.0);
-  const Eigen::Vector3d b2_raw = b3d.cross(heading);
-  const double b2_raw_norm = b2_raw.norm();
-  if (b2_raw_norm < 1e-6) {
-    return Eigen::Vector3d::Zero();
-  }
-
-  const Eigen::Vector3d b2d = b2_raw / b2_raw_norm;
-  const Eigen::Vector3d b2_raw_dot = b3d_dot.cross(heading) + b3d.cross(heading_dot);
-  const Eigen::Vector3d b2d_dot =
-    (Eigen::Matrix3d::Identity() - b2d * b2d.transpose()) * b2_raw_dot / b2_raw_norm;
-  const Eigen::Vector3d b1d = b2d.cross(b3d);
-  const Eigen::Vector3d b1d_dot = b2d_dot.cross(b3d) + b2d.cross(b3d_dot);
-
-  Eigen::Matrix3d Rd;
-  Rd.col(0) = b1d;
-  Rd.col(1) = b2d;
-  Rd.col(2) = b3d;
-
-  Eigen::Matrix3d Rd_dot;
-  Rd_dot.col(0) = b1d_dot;
-  Rd_dot.col(1) = b2d_dot;
-  Rd_dot.col(2) = b3d_dot;
-
-  const Eigen::Matrix3d omega_hat = 0.5 * (Rd.transpose() * Rd_dot - Rd_dot.transpose() * Rd);
-  const Eigen::Vector3d omega_ref = vee(omega_hat);
-  return omega_ref.allFinite() ? omega_ref : Eigen::Vector3d::Zero();
-}
-
 SunReferenceRates sunFlatnessReferenceRates(
   const VehicleState & state, const FlatReference & reference,
   double thrust_accel)
@@ -336,13 +222,6 @@ SunReferenceRates sunFlatnessReferenceRates(
   rates.alpha << -hAlpha.dot(b2), hAlpha.dot(b1),
     reference.yaw_accel * Eigen::Vector3d::UnitZ().dot(b3);
   return rates;
-}
-
-Eigen::Vector3d attitudeRateFeedback(
-  const Eigen::Vector3d & attitude_error,
-  const ControllerParams & params)
-{
-  return params.KR.asDiagonal() * attitude_error;
 }
 
 }  // namespace main_math

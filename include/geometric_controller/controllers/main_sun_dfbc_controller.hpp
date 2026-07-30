@@ -25,25 +25,14 @@ namespace geometric_controller
 
 class MainSunDFBCController : public ControllerBase {
 public:
-  explicit MainSunDFBCController(bool indi_variant = false)
-  : indi_variant_(indi_variant) {}
+  MainSunDFBCController() = default;
   ~MainSunDFBCController() override = default;
 
-  std::string name() const override {return indi_variant_ ? "main_sun_dfbc_indi" : "main_sun_dfbc";}
+  std::string name() const override {return "main_sun_dfbc";}
 
   ControllerCommand update(
     const VehicleState & state, const FlatReference & reference,
     const ControllerParams & params, double dt) override;
-  void reset(const VehicleState & state) override;
-
-private:
-  bool indi_variant_{false};
-  bool initialized_{false};
-  Eigen::Vector3d previous_omega_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d previous_torque_{Eigen::Vector3d::Zero()};
-  double previous_thrust_{0.0};
-  SecondOrderFilterState thrust_filter_;
-  SecondOrderFilterState torque_filter_;
 };
 
 }  // namespace geometric_controller

@@ -66,6 +66,22 @@ void ReferenceTrajectory::setParameters(const TrajectoryParameters & parameters)
   parameters_ = parameters;
   parameters_.traj_name = normalizeTrajectoryType(parameters_.traj_name);
   parameters_.path_preview_cycles = positiveOr(parameters_.path_preview_cycles, 1.0);
+  omega_transition_configured_ = false;
+}
+
+void ReferenceTrajectory::setParametersWithOmegaTransition(
+  const TrajectoryParameters & parameters, double time_s, double duration_s)
+{
+  const ThetaState current = thetaState(time_s);
+  parameters_ = parameters;
+  parameters_.traj_name = normalizeTrajectoryType(parameters_.traj_name);
+  parameters_.path_preview_cycles = positiveOr(parameters_.path_preview_cycles, 1.0);
+  omega_transition_configured_ = true;
+  omega_transition_start_time_s_ = std::max(0.0, time_s);
+  omega_transition_duration_s_ = std::max(duration_s, 1e-3);
+  omega_transition_start_theta_ = current.theta;
+  omega_transition_start_value_ = current.theta_dot;
+  omega_transition_target_value_ = positiveOr(parameters_.omega_value, 1.0);
 }
 
 const TrajectoryParameters & ReferenceTrajectory::parameters() const
@@ -123,6 +139,48 @@ ReferenceTrajectory::ThetaState ReferenceTrajectory::thetaState(double time_s) c
   const double omega_value = positiveOr(parameters_.omega_value, 1.0);
 
   ThetaState out;
+  if (omega_transition_configured_) {
+    const double elapsed = t - omega_transition_start_time_s_;
+    if (elapsed <= 0.0) {
+      out.theta =
+        omega_transition_start_theta_ + omega_transition_start_value_ * elapsed;
+      out.theta_dot = omega_transition_start_value_;
+      return out;
+    }
+
+    const double duration = omega_transition_duration_s_;
+    const double delta = omega_transition_target_value_ - omega_transition_start_value_;
+    if (elapsed < duration) {
+      const double u = elapsed / duration;
+      const double u2 = u * u;
+      const double u3 = u2 * u;
+      const double u4 = u3 * u;
+      const double u5 = u4 * u;
+      const double smooth = 10.0 * u3 - 15.0 * u4 + 6.0 * u5;
+      const double smooth_d1 = 30.0 * u2 - 60.0 * u3 + 30.0 * u4;
+      const double smooth_d2 = 60.0 * u - 180.0 * u2 + 120.0 * u3;
+      const double smooth_d3 = 60.0 - 360.0 * u + 360.0 * u2;
+      const double smooth_integral = 2.5 * u4 - 3.0 * u5 + u5 * u;
+      out.theta = omega_transition_start_theta_ +
+        omega_transition_start_value_ * elapsed +
+        delta * duration * smooth_integral;
+      out.theta_dot = omega_transition_start_value_ + delta * smooth;
+      out.theta_ddot = delta * smooth_d1 / duration;
+      out.theta_3 = delta * smooth_d2 / (duration * duration);
+      out.theta_4 = delta * smooth_d3 / (duration * duration * duration);
+      return out;
+    }
+
+    const double transition_theta =
+      omega_transition_start_theta_ +
+      0.5 * duration *
+      (omega_transition_start_value_ + omega_transition_target_value_);
+    out.theta =
+      transition_theta + omega_transition_target_value_ * (elapsed - duration);
+    out.theta_dot = omega_transition_target_value_;
+    return out;
+  }
+
   out.theta = theta0ForType() + parameters_.phase_shift + omega_value * t;
   out.theta_dot = omega_value;
   return out;

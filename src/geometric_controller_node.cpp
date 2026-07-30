@@ -25,14 +25,14 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <px4_msgs/msg/allocation_value.hpp>
+#include <px4_msgs/msg/vehicle_acceleration_indi_feedback.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <px4_msgs/msg/vehicle_angular_velocity.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
@@ -41,7 +41,6 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "geometric_controller/controllers/controller_factory.hpp"
-#include "geometric_controller/controllers/velocity_acceleration_filter.hpp"
 #include "geometric_controller/controllers/wrench_normalization.hpp"
 #include "geometric_controller/reference_trajectory.hpp"
 
@@ -59,7 +58,7 @@ constexpr double kSetpointRateHzMax = 250.0;
 constexpr double kInnerLoopRateHzDefault = 250.0;
 constexpr double kInnerLoopRateHzMin = 50.0;
 constexpr double kInnerLoopRateHzMax = 250.0;
-constexpr double kOuterLoopRateHzDefault = 125.0;
+constexpr double kOuterLoopRateHzDefault = 100.0;
 constexpr double kOuterLoopRateHzMin = 10.0;
 constexpr double kOuterLoopRateHzMax = 250.0;
 constexpr double kHeartbeatRateHzDefault = 5.0;
@@ -340,12 +339,11 @@ private:
       describeParameter(
       "Include acceleration feedforward when setpoint.level is position or velocity."));
     declare_parameter<int>(
-      "controller_type", 8,
+      "controller_type", 6,
       describeInteger(
         "Controller selector: 0 legacy_geometric, 1 main_geometric, 2 main_lee, "
-        "3 main_johnson, 4 main_sun_dfbc, 5 main_sun_dfbc_indi, 6 main_tal, "
-        "7 main_geometric_indi, 8 px4_direct.",
-        0, 8, 1));
+        "3 main_johnson, 4 main_sun_dfbc, 5 main_geometric_indi, 6 px4_direct.",
+        0, 6, 1));
     declare_parameter<int>(
       "ctrl_mode", geometric_controller::kErrorQuaternion,
       describeInteger("Legacy attitude error: 1 quaternion, 2 geometric.", 1, 2, 1));
@@ -358,10 +356,6 @@ private:
       10.0, 0.01));
     declare_parameter<double>("drag_dz", 0.0, describeDouble("Body z linear drag coefficient.", 0.0,
       10.0, 0.01));
-    declare_parameter<double>(
-      "max_acc", 45.0,
-      describeDouble("Maximum norm of position feedback acceleration [m/s^2].", 1.0, 100.0,
-      0.1));
     declare_parameter<double>("mass", 0.75, describeDouble("Vehicle mass [kg].", 0.05, 50.0,
       0.001));
     declare_parameter<double>("inertia_x", 0.0025, describeDouble("Body roll inertia [kg m^2].",
@@ -370,20 +364,7 @@ private:
       0.00001, 10.0, 0.00001));
     declare_parameter<double>("inertia_z", 0.0043, describeDouble("Body yaw inertia [kg m^2].",
       0.00001, 10.0, 0.00001));
-    declare_parameter<double>("indi_filter_cutoff_hz", 30.0,
-      describeDouble("Second-order Butterworth cutoff used by INDI feedback [Hz].", 0.0, 100.0,
-      1.0));
-    declare_parameter<double>("indi_velocity_lpf_hz", 0.0,
-      describeDouble("PX4 MPC_VEL_LP-equivalent velocity LPF cutoff [Hz].", 0.0, 50.0, 0.5));
-    declare_parameter<double>("indi_velocity_notch_hz", 0.0,
-      describeDouble(
-        "PX4 MPC_VEL_NF_FRQ-equivalent velocity notch frequency [Hz].", 0.0, 50.0, 0.5));
-    declare_parameter<double>("indi_velocity_notch_bandwidth_hz", 5.0,
-      describeDouble(
-        "PX4 MPC_VEL_NF_BW-equivalent velocity notch bandwidth [Hz].", 0.0, 50.0, 0.5));
-    declare_parameter<double>("indi_velocity_derivative_lpf_hz", 5.0,
-      describeDouble(
-        "PX4 MPC_VELD_LP-equivalent velocity-derivative LPF cutoff [Hz].", 0.0, 50.0, 0.5));
+    declare_parameter<bool>("indi_acceleration_enabled", true);
     declare_parameter<double>("Kp_x", 10.0, describeDouble("Position gain x.", 0.0, 40.0, 0.1));
     declare_parameter<double>("Kp_y", 10.0, describeDouble("Position gain y.", 0.0, 40.0, 0.1));
     declare_parameter<double>("Kp_z", 10.0, describeDouble("Position gain z.", 0.0, 40.0, 0.1));
@@ -402,7 +383,35 @@ private:
       100.0, 0.1));
     declare_parameter<double>("KOmega_y", 3.0, describeDouble("Yaw angular-rate gain.", 0.0,
       100.0, 0.1));
-
+    declare_parameter<double>("indi_Kp_x", 10.0,
+      describeDouble("Geometric INDI position gain x.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Kp_y", 10.0,
+      describeDouble("Geometric INDI position gain y.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Kp_z", 10.0,
+      describeDouble("Geometric INDI position gain z.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Kv_x", 6.0,
+      describeDouble("Geometric INDI velocity gain x.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Kv_y", 6.0,
+      describeDouble("Geometric INDI velocity gain y.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Kv_z", 6.0,
+      describeDouble("Geometric INDI velocity gain z.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Ktheta_r", 150.0,
+      describeDouble("Geometric INDI roll attitude gain.", 0.0, 500.0, 1.0));
+    declare_parameter<double>("indi_Ktheta_p", 150.0,
+      describeDouble("Geometric INDI pitch attitude gain.", 0.0, 500.0, 1.0));
+    declare_parameter<double>("indi_Ktheta_y", 3.0,
+      describeDouble("Geometric INDI yaw attitude gain.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Komega_r", 20.0,
+      describeDouble("Geometric INDI roll angular-rate gain.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Komega_p", 20.0,
+      describeDouble("Geometric INDI pitch angular-rate gain.", 0.0, 100.0, 0.1));
+    declare_parameter<double>("indi_Komega_y", 8.0,
+      describeDouble("Geometric INDI yaw angular-rate gain.", 0.0, 100.0, 0.1));
+    declare_parameter<double>(
+      "yaw_torque_cutoff_hz", 1.0,
+      describeDouble(
+        "Final yaw-torque low-pass cutoff for the external wrench path [Hz].",
+        0.0, 100.0, 0.1));
     declare_parameter<double>(
       "normalizedthrust_constant", 0.022058823529,
       describeDouble(
@@ -436,13 +445,14 @@ private:
     declare_parameter<std::string>("px4.vehicle_local_position_topic",
       px4VersionedTopic<px4_msgs::msg::VehicleLocalPosition>(
         "/fmu/out/vehicle_local_position"));
-    declare_parameter<std::string>("px4.vehicle_odometry_topic", "/fmu/out/vehicle_odometry");
+    declare_parameter<std::string>(
+      "px4.acceleration_indi_feedback_topic", "/fmu/out/vehicle_acceleration_indi_feedback");
+    declare_parameter<std::string>(
+      "px4.allocation_value_topic", "/fmu/out/allocation_value");
     declare_parameter<std::string>(
       "px4.vehicle_attitude_topic", "/fmu/out/vehicle_attitude");
     declare_parameter<std::string>(
       "px4.vehicle_angular_velocity_topic", "/fmu/out/vehicle_angular_velocity");
-    declare_parameter<std::string>(
-      "px4.vehicle_control_mode_topic", "/fmu/out/vehicle_control_mode");
     declare_parameter<int>("px4.target_system", 1);
     declare_parameter<int>("px4.target_component", 1);
     declare_parameter<int>("px4.source_system", 1);
@@ -607,22 +617,31 @@ private:
       get_parameter("KOmega_r").as_double(),
       get_parameter("KOmega_p").as_double(),
       get_parameter("KOmega_y").as_double());
+    controller_params_.indi_Kp = Eigen::Vector3d(
+      get_parameter("indi_Kp_x").as_double(),
+      get_parameter("indi_Kp_y").as_double(),
+      get_parameter("indi_Kp_z").as_double());
+    controller_params_.indi_Kv = Eigen::Vector3d(
+      get_parameter("indi_Kv_x").as_double(),
+      get_parameter("indi_Kv_y").as_double(),
+      get_parameter("indi_Kv_z").as_double());
+    controller_params_.indi_Ktheta = Eigen::Vector3d(
+      get_parameter("indi_Ktheta_r").as_double(),
+      get_parameter("indi_Ktheta_p").as_double(),
+      get_parameter("indi_Ktheta_y").as_double());
+    controller_params_.indi_Komega = Eigen::Vector3d(
+      get_parameter("indi_Komega_r").as_double(),
+      get_parameter("indi_Komega_p").as_double(),
+      get_parameter("indi_Komega_y").as_double());
     controller_params_.mass = get_parameter("mass").as_double();
     controller_params_.inertia = Eigen::Vector3d(
       get_parameter("inertia_x").as_double(),
       get_parameter("inertia_y").as_double(),
       get_parameter("inertia_z").as_double()).asDiagonal();
-    controller_params_.indi_filter_cutoff_hz =
-      get_parameter("indi_filter_cutoff_hz").as_double();
-    velocity_acceleration_filter_params_.velocity_lpf_hz =
-      get_parameter("indi_velocity_lpf_hz").as_double();
-    velocity_acceleration_filter_params_.velocity_notch_hz =
-      get_parameter("indi_velocity_notch_hz").as_double();
-    velocity_acceleration_filter_params_.velocity_notch_bandwidth_hz =
-      get_parameter("indi_velocity_notch_bandwidth_hz").as_double();
-    velocity_acceleration_filter_params_.derivative_lpf_hz =
-      get_parameter("indi_velocity_derivative_lpf_hz").as_double();
-    controller_params_.max_feedback_acc = get_parameter("max_acc").as_double();
+    controller_params_.indi_acceleration_enabled =
+      get_parameter("indi_acceleration_enabled").as_bool();
+    controller_params_.outer_loop_rate_hz = outer_loop_rate_hz_;
+    yaw_torque_cutoff_hz_ = get_parameter("yaw_torque_cutoff_hz").as_double();
     normalizedthrust_constant_ = get_parameter("normalizedthrust_constant").as_double();
     normalizedthrust_offset_ = get_parameter("normalizedthrust_offset").as_double();
     normalizedtorque_constant_ = Eigen::Vector3d(
@@ -639,11 +658,12 @@ private:
     vehicle_command_topic_ = get_parameter("px4.vehicle_command_topic").as_string();
     vehicle_status_topic_ = get_parameter("px4.vehicle_status_topic").as_string();
     vehicle_local_position_topic_ = get_parameter("px4.vehicle_local_position_topic").as_string();
-    vehicle_odometry_topic_ = get_parameter("px4.vehicle_odometry_topic").as_string();
+    acceleration_indi_feedback_topic_ =
+      get_parameter("px4.acceleration_indi_feedback_topic").as_string();
+    allocation_value_topic_ = get_parameter("px4.allocation_value_topic").as_string();
     vehicle_attitude_topic_ = get_parameter("px4.vehicle_attitude_topic").as_string();
     vehicle_angular_velocity_topic_ =
       get_parameter("px4.vehicle_angular_velocity_topic").as_string();
-    vehicle_control_mode_topic_ = get_parameter("px4.vehicle_control_mode_topic").as_string();
     target_system_ = static_cast<uint8_t>(get_parameter("px4.target_system").as_int());
     target_component_ = static_cast<uint8_t>(get_parameter("px4.target_component").as_int());
     source_system_ = static_cast<uint8_t>(get_parameter("px4.source_system").as_int());
@@ -728,9 +748,20 @@ private:
     px4_pub_qos.reliable();
     px4_pub_qos.durability_volatile();
 
-    auto px4_sub_qos = rclcpp::QoS(rclcpp::KeepLast(5));
+    // The angular-rate INDI loop must never work through a backlog of stale
+    // samples. Keep only the newest high-rate PX4 sample and use the same
+    // best-effort semantics as sensor data.
+    auto px4_sub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     px4_sub_qos.best_effort();
     px4_sub_qos.durability_volatile();
+
+    // Thrust/torque are streaming setpoints, not commands that should be
+    // retransmitted later. A reliable KeepLast(10) writer can deliver a burst
+    // of stale torque setpoints after a short transport stall, which adds
+    // destabilizing delay to the incremental feedback loop.
+    auto px4_wrench_pub_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+    px4_wrench_pub_qos.best_effort();
+    px4_wrench_pub_qos.durability_volatile();
 
     offboard_control_mode_publisher_ =
       create_publisher<px4_msgs::msg::OffboardControlMode>(offboard_control_mode_topic_,
@@ -739,10 +770,10 @@ private:
       create_publisher<px4_msgs::msg::TrajectorySetpoint>(trajectory_setpoint_topic_, px4_pub_qos);
     vehicle_thrust_setpoint_publisher_ =
       create_publisher<px4_msgs::msg::VehicleThrustSetpoint>(
-      vehicle_thrust_setpoint_topic_, px4_pub_qos);
+      vehicle_thrust_setpoint_topic_, px4_wrench_pub_qos);
     vehicle_torque_setpoint_publisher_ =
       create_publisher<px4_msgs::msg::VehicleTorqueSetpoint>(
-      vehicle_torque_setpoint_topic_, px4_pub_qos);
+      vehicle_torque_setpoint_topic_, px4_wrench_pub_qos);
     vehicle_command_publisher_ =
       create_publisher<px4_msgs::msg::VehicleCommand>(vehicle_command_topic_, px4_pub_qos);
 
@@ -757,10 +788,21 @@ private:
         std::bind(&TrajectoryOffboardNode::vehicleLocalPositionCallback, this,
         std::placeholders::_1));
     }
-    if (!vehicle_odometry_topic_.empty()) {
-      vehicle_odometry_subscriber_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
-        vehicle_odometry_topic_, px4_sub_qos,
-        std::bind(&TrajectoryOffboardNode::vehicleOdometryCallback, this, std::placeholders::_1));
+    if (!acceleration_indi_feedback_topic_.empty()) {
+      acceleration_indi_feedback_subscriber_ =
+        create_subscription<px4_msgs::msg::VehicleAccelerationIndiFeedback>(
+        acceleration_indi_feedback_topic_, px4_sub_qos,
+        std::bind(
+          &TrajectoryOffboardNode::accelerationIndiFeedbackCallback, this,
+          std::placeholders::_1));
+    }
+    if (!allocation_value_topic_.empty()) {
+      allocation_value_subscriber_ =
+        create_subscription<px4_msgs::msg::AllocationValue>(
+        allocation_value_topic_, px4_sub_qos,
+        std::bind(
+          &TrajectoryOffboardNode::allocationValueCallback, this,
+          std::placeholders::_1));
     }
     if (!vehicle_attitude_topic_.empty()) {
       vehicle_attitude_subscriber_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
@@ -775,14 +817,6 @@ private:
           &TrajectoryOffboardNode::vehicleAngularVelocityCallback, this,
           std::placeholders::_1));
     }
-    if (!vehicle_control_mode_topic_.empty()) {
-      vehicle_control_mode_subscriber_ = create_subscription<px4_msgs::msg::VehicleControlMode>(
-        vehicle_control_mode_topic_, px4_sub_qos,
-        std::bind(
-          &TrajectoryOffboardNode::vehicleControlModeCallback, this,
-          std::placeholders::_1));
-    }
-
     auto reference_path_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     reference_path_qos.reliable();
     reference_path_qos.transient_local();
@@ -802,16 +836,11 @@ private:
     configureHeartbeatTimer();
   }
 
-  void configureActiveController(bool log_change, bool require_px4_mode_transition = false)
+  void configureActiveController(bool log_change)
   {
     active_controller_ = geometric_controller::makeController(active_controller_type_);
-    last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     last_controller_sample_timestamp_ = 0;
     next_controller_sample_timestamp_ = 0;
-    controller_reference_received_ = false;
-    controller_mode_transition_pending_ =
-      log_change && isOffboard() && require_px4_mode_transition &&
-      geometric_controller::isRosController(active_controller_type_);
     if (active_controller_ && controllerFeedbackValid()) {
       active_controller_->reset(controllerState());
     }
@@ -821,12 +850,6 @@ private:
         geometric_controller::controllerTypeName(active_controller_type_).c_str(),
         geometric_controller::isRosController(active_controller_type_) ?
         "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint");
-      if (controller_mode_transition_pending_) {
-        RCLCPP_INFO(
-          get_logger(),
-          "Waiting for PX4 VehicleControlMode to disable attitude/rate control and enable "
-          "control allocation before publishing the first wrench.");
-      }
     }
   }
 
@@ -871,11 +894,11 @@ private:
       if (parameterAffectsTrajectoryRestart(name)) {
         trajectory_reset_pending_ = true;
       }
+      if (parameterAffectsReferenceTrajectory(name)) {
+        reference_parameters_pending_ = true;
+      }
       if (parameterAffectsControllerReset(name)) {
         controller_reset_pending_ = true;
-      }
-      if (startsWith(name, "indi_velocity_")) {
-        velocity_acceleration_filter_reset_pending_ = true;
       }
       if (name == "trajectory_type") {
         prefer_trajectory_type_ = true;
@@ -909,15 +932,22 @@ private:
            startsWith(name, "flip_loop_") || startsWith(name, "fast_circle_");
   }
 
+  bool parameterAffectsReferenceTrajectory(const std::string & name) const
+  {
+    return parameterAffectsTrajectoryRestart(name) ||
+           name == "omega_value" || name == "path_preview_cycles" ||
+           name == "trajectory_yaw_lock" || name == "trajectory_yaw_fixed";
+  }
+
   bool parameterAffectsControllerReset(const std::string & name) const
   {
     return name == "ctrl_mode" || name == "gravity" ||
-           name == "mass" || name == "indi_filter_cutoff_hz" ||
-           startsWith(name, "indi_velocity_") ||
-           name == "max_acc" || startsWith(name, "drag_") ||
+           name == "mass" ||
+           name == "indi_acceleration_enabled" ||
+           startsWith(name, "drag_") ||
            startsWith(name, "inertia_") || startsWith(name, "Kp_") ||
            startsWith(name, "Kv_") || startsWith(name, "KR_") ||
-           startsWith(name, "KOmega_");
+           startsWith(name, "KOmega_") || startsWith(name, "indi_");
   }
 
   static std::string normalizeSetpointLevel(std::string value)
@@ -948,6 +978,7 @@ private:
     const double previous_outer_loop_rate = outer_loop_rate_hz_;
     const double previous_inner_loop_rate = inner_loop_rate_hz_;
     const double previous_heartbeat_rate = heartbeat_rate_hz_;
+    const double previous_omega_value = trajectory_parameters_.omega_value;
     const auto previous_controller_type = active_controller_type_;
     const std::string previous_offboard_topic = offboard_control_mode_topic_;
     const std::string previous_trajectory_topic = trajectory_setpoint_topic_;
@@ -956,10 +987,11 @@ private:
     const std::string previous_command_topic = vehicle_command_topic_;
     const std::string previous_status_topic = vehicle_status_topic_;
     const std::string previous_local_position_topic = vehicle_local_position_topic_;
-    const std::string previous_odometry_topic = vehicle_odometry_topic_;
+    const std::string previous_acceleration_feedback_topic =
+      acceleration_indi_feedback_topic_;
+    const std::string previous_allocation_value_topic = allocation_value_topic_;
     const std::string previous_attitude_topic = vehicle_attitude_topic_;
     const std::string previous_angular_velocity_topic = vehicle_angular_velocity_topic_;
-    const std::string previous_control_mode_topic = vehicle_control_mode_topic_;
     const std::string previous_path_topic = visualization_path_topic_;
     const std::string previous_pose_topic = visualization_pose_topic_;
     const std::string previous_vehicle_pose_topic = visualization_vehicle_pose_topic_;
@@ -969,49 +1001,35 @@ private:
     const bool preserve_phase =
       !trajectory_reset_pending_ && (trajectory_started_ || !takeoff_before_trajectory_);
     const double elapsed_time_s = std::max(0.0, (now() - start_time_).seconds());
-    const double previous_theta =
-      preserve_phase ? reference_trajectory_.theta(elapsed_time_s) : 0.0;
 
     loadParameters();
-    if (velocity_acceleration_filter_reset_pending_) {
-      velocity_acceleration_filter_.reset();
-      filtered_velocity_acceleration_ned_.setZero();
-      filtered_velocity_acceleration_valid_ = false;
-      last_velocity_filter_timestamp_sample_ = 0;
-    }
     syncSelectorParameters();
     if (previous_controller_type != active_controller_type_) {
-      const bool require_px4_mode_transition =
-        !geometric_controller::isRosController(previous_controller_type) &&
-        geometric_controller::isRosController(active_controller_type_);
-      configureActiveController(true, require_px4_mode_transition);
+      configureActiveController(true);
       if (offboard_enabled_) {
         publishOffboardControlMode(now());
       }
     } else if (controller_reset_pending_ && active_controller_ && controllerFeedbackValid()) {
       active_controller_->reset(controllerState());
-      last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
       RCLCPP_INFO(
         get_logger(), "Reset %s state after controller parameter update.",
         active_controller_->name().c_str());
     }
 
-    if (preserve_phase) {
-      geometric_controller::ReferenceTrajectory candidate(trajectory_parameters_);
-      const double candidate_theta = candidate.theta(elapsed_time_s);
-      const double theta_delta = previous_theta - candidate_theta;
-      if (std::abs(theta_delta) > 1e-9) {
-        trajectory_parameters_.phase_shift += theta_delta;
-        RCLCPP_INFO(
-          get_logger(),
-          "Trajectory omega updated with continuous phase: trajName=%s omega_value=%.3f "
-          "phase_shift=%.3f",
-          trajectory_parameters_.traj_name.c_str(), trajectory_parameters_.omega_value,
-          trajectory_parameters_.phase_shift);
-      }
+    const bool omega_changed =
+      std::abs(previous_omega_value - trajectory_parameters_.omega_value) > 1e-9;
+    if (reference_parameters_pending_ && preserve_phase && omega_changed) {
+      constexpr double kOmegaTransitionDurationS = 1.0;
+      reference_trajectory_.setParametersWithOmegaTransition(
+        trajectory_parameters_, elapsed_time_s, kOmegaTransitionDurationS);
+      RCLCPP_INFO(
+        get_logger(),
+        "Trajectory omega transition: trajName=%s %.3f -> %.3f rad/s in %.1f s.",
+        trajectory_parameters_.traj_name.c_str(), previous_omega_value,
+        trajectory_parameters_.omega_value, kOmegaTransitionDurationS);
+    } else if (reference_parameters_pending_) {
+      reference_trajectory_.setParameters(trajectory_parameters_);
     }
-
-    reference_trajectory_.setParameters(trajectory_parameters_);
 
     const bool topics_changed =
       previous_offboard_topic != offboard_control_mode_topic_ ||
@@ -1021,10 +1039,10 @@ private:
       previous_command_topic != vehicle_command_topic_ ||
       previous_status_topic != vehicle_status_topic_ ||
       previous_local_position_topic != vehicle_local_position_topic_ ||
-      previous_odometry_topic != vehicle_odometry_topic_ ||
+      previous_acceleration_feedback_topic != acceleration_indi_feedback_topic_ ||
+      previous_allocation_value_topic != allocation_value_topic_ ||
       previous_attitude_topic != vehicle_attitude_topic_ ||
       previous_angular_velocity_topic != vehicle_angular_velocity_topic_ ||
-      previous_control_mode_topic != vehicle_control_mode_topic_ ||
       previous_path_topic != visualization_path_topic_ ||
       previous_pose_topic != visualization_pose_topic_ ||
       previous_vehicle_pose_topic != visualization_vehicle_pose_topic_ ||
@@ -1057,8 +1075,8 @@ private:
 
     parameters_pending_ = false;
     trajectory_reset_pending_ = false;
+    reference_parameters_pending_ = false;
     controller_reset_pending_ = false;
-    velocity_acceleration_filter_reset_pending_ = false;
     path_publish_time_s_ = -std::numeric_limits<double>::infinity();
 
     RCLCPP_INFO(
@@ -1078,9 +1096,6 @@ private:
     trajectory_setpoint_gate_open_ = false;
     auto_start_ready_logged_ = false;
     auto_start_requested_ = false;
-    last_controller_update_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-    last_controller_sample_timestamp_ = 0;
-    next_controller_sample_timestamp_ = 0;
     controller_reference_received_ = false;
     if (active_controller_ && controllerFeedbackValid()) {
       active_controller_->reset(controllerState());
@@ -1267,6 +1282,12 @@ private:
     sample.acceleration = {0.0, 0.0, 0.0};
     sample.jerk = {0.0, 0.0, 0.0};
     sample.snap = {0.0, 0.0, 0.0};
+    if (vehicle_attitude_received_) {
+      const auto & q = vehicle_attitude_.q;
+      sample.yaw = std::atan2(
+        2.0 * (q[0] * q[3] + q[1] * q[2]),
+        1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
+    }
     sample.yaw_rate = 0.0;
     sample.yaw_acceleration = 0.0;
     return sample;
@@ -1280,9 +1301,6 @@ private:
   bool readyForStartTransition() const
   {
     if (!offboard_enabled_) {
-      return true;
-    }
-    if (auto_start_ && auto_start_requested_) {
       return true;
     }
     if (status_received_) {
@@ -1311,8 +1329,15 @@ private:
     if (geometric_controller::isRosController(active_controller_type_) &&
       !controllerFeedbackValid())
     {
+      if (active_controller_type_ ==
+        geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
+      {
+        return controller_params_.indi_acceleration_enabled ?
+               "waiting for PX4 INDI attitude/rate/acceleration/allocation feedback" :
+               "waiting for PX4 INDI attitude/rate/allocation feedback";
+      }
       return "waiting for valid PX4 attitude on '" + vehicle_attitude_topic_ +
-             "' and 250 Hz angular velocity on '" + vehicle_angular_velocity_topic_ + "'";
+             "' and angular velocity on '" + vehicle_angular_velocity_topic_ + "'";
     }
     return {};
   }
@@ -1343,6 +1368,11 @@ private:
         current_position[axis], current_velocity[axis], 0.0, target.position[axis], 0.0, 0.0,
         start_transition_duration_s_);
     }
+    const double current_yaw = controllerState().yaw;
+    const double target_yaw = current_yaw + wrapPi(target.yaw - current_yaw);
+    start_transition_yaw_coefficients_ = computeQuinticCoefficients(
+      current_yaw, 0.0, 0.0, target_yaw, 0.0, 0.0,
+      start_transition_duration_s_);
     start_transition_start_time_ = stamp;
     start_transition_active_ = true;
 
@@ -1380,6 +1410,12 @@ private:
         20.0 * c[5] * t3;
       sample.jerk[axis] = 6.0 * c[3] + 24.0 * c[4] * t + 60.0 * c[5] * t2;
     }
+    const auto & c = start_transition_yaw_coefficients_;
+    sample.yaw = wrapPi(c[0] + c[1] * t + c[2] * t2 + c[3] * t3 + c[4] * t4 + c[5] * t5);
+    sample.yaw_rate =
+      c[1] + 2.0 * c[2] * t + 3.0 * c[3] * t2 + 4.0 * c[4] * t3 + 5.0 * c[5] * t4;
+    sample.yaw_acceleration =
+      2.0 * c[2] + 6.0 * c[3] * t + 12.0 * c[4] * t2 + 20.0 * c[5] * t3;
     sample.snap = {0.0, 0.0, 0.0};
     return sample;
   }
@@ -1472,7 +1508,8 @@ private:
     msg.acceleration = !ros_controller && setpoint_level_ == "acceleration";
     msg.attitude = false;
     msg.body_rate = false;
-    msg.thrust_and_torque = ros_controller;
+    msg.thrust_and_torque =
+      geometric_controller::isRosController(active_controller_type_);
     msg.direct_actuator = false;
     msg.timestamp = timestampMicros(stamp);
     offboard_control_mode_publisher_->publish(msg);
@@ -1506,55 +1543,47 @@ private:
       return false;
     }
     const auto & q = vehicle_attitude_.q;
+    const bool attitude_valid =
+      std::isfinite(q[0]) && std::isfinite(q[1]) &&
+      std::isfinite(q[2]) && std::isfinite(q[3]) &&
+      vehicle_attitude_.timestamp_sample > 0;
+    if (!attitude_valid) {
+      return false;
+    }
     const auto & omega = vehicle_angular_velocity_.xyz;
-    return std::isfinite(q[0]) && std::isfinite(q[1]) && std::isfinite(q[2]) &&
-           std::isfinite(q[3]) && std::isfinite(omega[0]) &&
-           std::isfinite(omega[1]) && std::isfinite(omega[2]) &&
-           vehicle_attitude_.timestamp_sample > 0 &&
-           vehicle_angular_velocity_.timestamp_sample > 0;
-  }
-
-  bool rosWrenchModeConfirmed() const
-  {
-    if (!isOffboard()) {
-      return true;
-    }
-    if (!vehicle_control_mode_received_) {
+    const bool angular_velocity_valid =
+      std::isfinite(omega[0]) && std::isfinite(omega[1]) &&
+      std::isfinite(omega[2]) &&
+      vehicle_angular_velocity_.timestamp_sample > 0;
+    if (!angular_velocity_valid) {
       return false;
     }
-    return vehicle_control_mode_.flag_control_offboard_enabled &&
-           vehicle_control_mode_.flag_control_allocation_enabled &&
-           !vehicle_control_mode_.flag_control_position_enabled &&
-           !vehicle_control_mode_.flag_control_velocity_enabled &&
-           !vehicle_control_mode_.flag_control_attitude_enabled &&
-           !vehicle_control_mode_.flag_control_rates_enabled;
-  }
-
-  bool feedbackTimestampsAligned(uint64_t angular_timestamp_sample) const
-  {
-    if (angular_timestamp_sample == 0 || vehicle_attitude_.timestamp_sample == 0 ||
-      vehicle_local_position_.timestamp_sample == 0)
+    if (active_controller_type_ ==
+      geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
     {
-      return false;
+      if (!allocation_value_received_ ||
+        !std::all_of(
+          allocation_value_.allocated_torque.begin(),
+          allocation_value_.allocated_torque.end(),
+          [](float value) {return std::isfinite(value);}))
+      {
+        return false;
+      }
+      if (controller_params_.indi_acceleration_enabled) {
+        return accelerationIndiFeedbackValid();
+      }
     }
-    const auto timestamp_distance = [](uint64_t lhs, uint64_t rhs) {
-        return lhs >= rhs ? lhs - rhs : rhs - lhs;
-      };
-    // Reuse the newest slower-loop state for every fresh gyro sample, as PX4's
-    // own cascade and the MAVROS controller do. Tight one/two-period gates can
-    // create gaps in the torque stream under SITL/DDS scheduling load; PX4 then
-    // holds a stale high-gain torque, which is less safe than using a slightly
-    // older attitude or position sample. Only reject genuinely stale state.
-    const uint64_t attitude_tolerance_us = std::max<uint64_t>(
-      100000, static_cast<uint64_t>(std::ceil(4.0e6 / inner_loop_rate_hz_)));
-    const uint64_t position_tolerance_us = static_cast<uint64_t>(
-      std::max(250000.0, std::ceil(3.0e6 / outer_loop_rate_hz_)));
-    return timestamp_distance(
-      angular_timestamp_sample, vehicle_attitude_.timestamp_sample) <=
-           attitude_tolerance_us &&
-           timestamp_distance(
-      angular_timestamp_sample, vehicle_local_position_.timestamp_sample) <=
-           position_tolerance_us;
+    return true;
+  }
+
+  bool accelerationIndiFeedbackValid() const
+  {
+    return acceleration_indi_feedback_received_ &&
+           acceleration_indi_feedback_.timestamp_sample > 0 &&
+           std::all_of(
+      acceleration_indi_feedback_.xyz.begin(),
+      acceleration_indi_feedback_.xyz.end(),
+      [](float value) {return std::isfinite(value);});
   }
 
   geometric_controller::VehicleState controllerState() const
@@ -1568,10 +1597,13 @@ private:
       static_cast<double>(vehicle_local_position_.vx),
       static_cast<double>(vehicle_local_position_.vy),
       static_cast<double>(vehicle_local_position_.vz)});
-    // mc_pos_control acceleration INDI uses its private filtered numerical
-    // derivative of NED velocity, not VehicleLocalPosition.ax/ay/az.
-    state.acceleration = filtered_velocity_acceleration_ned_;
-    state.acceleration_valid = filtered_velocity_acceleration_valid_;
+    // PX4 publishes the already filtered velocity derivative used by
+    // mc_pos_control. The controller reads the newest sample without a second
+    // ROS-side filter.
+    state.acceleration = Eigen::Vector3d(
+      static_cast<double>(acceleration_indi_feedback_.xyz[0]),
+      static_cast<double>(acceleration_indi_feedback_.xyz[1]),
+      static_cast<double>(acceleration_indi_feedback_.xyz[2]));
 
     state.attitude = Eigen::Vector4d(
       static_cast<double>(vehicle_attitude_.q[0]),
@@ -1579,15 +1611,31 @@ private:
       static_cast<double>(vehicle_attitude_.q[2]),
       static_cast<double>(vehicle_attitude_.q[3]));
     state.attitude.normalize();
-    state.body_rate = Eigen::Vector3d(
-      static_cast<double>(vehicle_angular_velocity_.xyz[0]),
-      static_cast<double>(vehicle_angular_velocity_.xyz[1]),
-      static_cast<double>(vehicle_angular_velocity_.xyz[2]));
-    state.angular_acceleration = Eigen::Vector3d(
-      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[0]),
-      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[1]),
-      static_cast<double>(vehicle_angular_velocity_.xyz_derivative[2]));
-    state.angular_acceleration_valid = state.angular_acceleration.allFinite();
+    const Eigen::Vector3d allocated_force_body(
+      allocation_value_.allocated_force[0],
+      allocation_value_.allocated_force[1],
+      allocation_value_.allocated_force[2]);
+    state.applied_thrust_axis_force =
+      -Eigen::Quaterniond(
+      state.attitude[0], state.attitude[1], state.attitude[2], state.attitude[3])
+      .toRotationMatrix() * allocated_force_body;
+    const auto & angular_velocity = vehicle_angular_velocity_;
+    const Eigen::Vector3d raw_body_rate(
+      static_cast<double>(angular_velocity.xyz[0]),
+      static_cast<double>(angular_velocity.xyz[1]),
+      static_cast<double>(angular_velocity.xyz[2]));
+    const Eigen::Vector3d raw_angular_acceleration(
+      static_cast<double>(angular_velocity.xyz_derivative[0]),
+      static_cast<double>(angular_velocity.xyz_derivative[1]),
+      static_cast<double>(angular_velocity.xyz_derivative[2]));
+    // PX4 already filters angular velocity/angular acceleration and models
+    // actuator torque in AllocationValue. Do not add a second ROS-side filter.
+    state.body_rate = raw_body_rate;
+    state.angular_acceleration = raw_angular_acceleration;
+    state.applied_torque = Eigen::Vector3d(
+      allocation_value_.allocated_torque[0],
+      allocation_value_.allocated_torque[1],
+      allocation_value_.allocated_torque[2]);
     state.yaw = std::atan2(
       2.0 * (state.attitude[0] * state.attitude[3] +
       state.attitude[1] * state.attitude[2]),
@@ -1598,7 +1646,7 @@ private:
 
   void publishControllerSetpoint(
     const geometric_controller::TrajectorySample & sample, const rclcpp::Time & stamp,
-    uint64_t feedback_timestamp_sample)
+    uint64_t feedback_timestamp_sample, double dt)
   {
     if (!active_controller_) {
       return;
@@ -1606,18 +1654,6 @@ private:
 
     const auto state = controllerState();
     const auto reference = controllerReference(sample);
-    double dt = 1.0 / inner_loop_rate_hz_;
-    if (last_controller_sample_timestamp_ > 0 &&
-      feedback_timestamp_sample > last_controller_sample_timestamp_)
-    {
-      dt = std::clamp(
-        static_cast<double>(
-          feedback_timestamp_sample - last_controller_sample_timestamp_) * 1e-6,
-        0.0002, 0.1);
-    }
-    last_controller_sample_timestamp_ = feedback_timestamp_sample;
-    last_controller_update_time_ = stamp;
-
     auto command = active_controller_->update(state, reference, controller_params_, dt);
     if (!command.torque.allFinite() || !std::isfinite(command.collective_thrust)) {
       RCLCPP_ERROR_THROTTLE(
@@ -1625,6 +1661,8 @@ private:
         "%s produced a non-finite command; publishing level hover fallback.",
         active_controller_->name().c_str());
       command.torque.setZero();
+      command.indi_torque_feedback.setZero();
+      command.indi_torque_feedback_valid = false;
       command.collective_thrust =
         controller_params_.mass * std::abs(controller_params_.gravity.z());
     }
@@ -1650,6 +1688,18 @@ private:
         command.torque.y(), command.torque.z());
     }
 
+    const double unfiltered_yaw_torque = command.torque.z();
+    const double filtered_yaw_torque =
+      updateYawTorqueFilter(unfiltered_yaw_torque, dt);
+    if (command.indi_torque_feedback_valid) {
+      const double normalized_unfiltered_yaw =
+        normalizedtorque_constant_.z() * unfiltered_yaw_torque;
+      command.indi_torque_feedback.z() =
+        std::abs(normalized_unfiltered_yaw) > std::numeric_limits<float>::epsilon() ?
+        command.indi_torque_feedback.z() *
+        filtered_yaw_torque / unfiltered_yaw_torque : 0.0;
+    }
+    command.torque.z() = filtered_yaw_torque;
     const auto normalized = geometric_controller::normalizeWrench(
       command, controller_params_.mass, normalizedthrust_constant_,
       normalizedthrust_offset_, normalizedtorque_constant_);
@@ -1673,9 +1723,28 @@ private:
       static_cast<float>(normalized.torque.x()),
       static_cast<float>(normalized.torque.y()),
       static_cast<float>(normalized.torque.z())};
+    torque_message.xyz_indi_feedback = {
+      static_cast<float>(normalized.indi_torque_feedback.x()),
+      static_cast<float>(normalized.indi_torque_feedback.y()),
+      static_cast<float>(normalized.indi_torque_feedback.z())};
+    torque_message.xyz_indi_feedback_valid =
+      normalized.indi_torque_feedback_valid;
     torque_message.timestamp = timestamp;
     torque_message.timestamp_sample = feedback_timestamp_sample;
     vehicle_torque_setpoint_publisher_->publish(torque_message);
+  }
+
+  double updateYawTorqueFilter(double input, double dt)
+  {
+    if (!yaw_torque_filter_initialized_ || yaw_torque_cutoff_hz_ <= 0.0) {
+      yaw_torque_filter_state_ = input;
+      yaw_torque_filter_initialized_ = true;
+      return input;
+    }
+    const double time_constant = 1.0 / (2.0 * kPi * yaw_torque_cutoff_hz_);
+    const double alpha = dt / (time_constant + dt);
+    yaw_torque_filter_state_ += alpha * (input - yaw_torque_filter_state_);
+    return yaw_torque_filter_state_;
   }
 
   void publishTrajectorySetpoint(
@@ -1911,44 +1980,13 @@ private:
   {
     vehicle_local_position_ = *msg;
     local_position_received_ = true;
-
-    const uint64_t timestamp_sample =
-      msg->timestamp_sample > 0 ? msg->timestamp_sample : msg->timestamp;
-    const bool velocity_valid =
-      msg->v_xy_valid && msg->v_z_valid &&
-      std::isfinite(msg->vx) && std::isfinite(msg->vy) && std::isfinite(msg->vz);
-    if (!velocity_valid) {
-      velocity_acceleration_filter_.reset();
-      filtered_velocity_acceleration_valid_ = false;
-      last_velocity_filter_timestamp_sample_ = 0;
-      return;
-    }
-    if (timestamp_sample == 0 ||
-      (last_velocity_filter_timestamp_sample_ > 0 &&
-      timestamp_sample <= last_velocity_filter_timestamp_sample_))
-    {
-      return;
-    }
-
-    double dt = 1.0 / outer_loop_rate_hz_;
-    if (last_velocity_filter_timestamp_sample_ > 0) {
-      dt = std::clamp(
-        static_cast<double>(
-          timestamp_sample - last_velocity_filter_timestamp_sample_) * 1e-6,
-        0.001, 0.1);
-    }
-    last_velocity_filter_timestamp_sample_ = timestamp_sample;
-    filtered_velocity_acceleration_ned_ = velocity_acceleration_filter_.update(
-      Eigen::Vector3d(msg->vx, msg->vy, msg->vz), dt,
-      velocity_acceleration_filter_params_);
-    filtered_velocity_acceleration_valid_ =
-      filtered_velocity_acceleration_ned_.allFinite();
   }
 
-  void vehicleOdometryCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+  void accelerationIndiFeedbackCallback(
+    const px4_msgs::msg::VehicleAccelerationIndiFeedback::SharedPtr msg)
   {
-    vehicle_odometry_ = *msg;
-    vehicle_odometry_received_ = true;
+    acceleration_indi_feedback_ = *msg;
+    acceleration_indi_feedback_received_ = true;
   }
 
   void vehicleAttitudeCallback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
@@ -1957,21 +1995,11 @@ private:
     vehicle_attitude_received_ = true;
   }
 
-  void vehicleControlModeCallback(const px4_msgs::msg::VehicleControlMode::SharedPtr msg)
+  void allocationValueCallback(
+    const px4_msgs::msg::AllocationValue::SharedPtr msg)
   {
-    vehicle_control_mode_ = *msg;
-    vehicle_control_mode_received_ = true;
-    if (controller_mode_transition_pending_ && rosWrenchModeConfirmed()) {
-      controller_mode_transition_pending_ = false;
-      last_controller_sample_timestamp_ = 0;
-      next_controller_sample_timestamp_ = 0;
-      if (active_controller_ && controllerFeedbackValid()) {
-        active_controller_->reset(controllerState());
-      }
-      RCLCPP_INFO(
-        get_logger(),
-        "PX4 wrench mode confirmed; ROS controller state reset and 250 Hz wrench output enabled.");
-    }
+    allocation_value_ = *msg;
+    allocation_value_received_ = true;
   }
 
   void vehicleAngularVelocityCallback(
@@ -1989,52 +2017,37 @@ private:
 
     const uint64_t sample_timestamp =
       msg->timestamp_sample > 0 ? msg->timestamp_sample : msg->timestamp;
-    if (sample_timestamp == 0 || sample_timestamp <= last_controller_sample_timestamp_) {
-      return;
-    }
-    if (!feedbackTimestampsAligned(sample_timestamp)) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "Withholding wrench: PX4 attitude/angular-rate/position timestamps are not aligned.");
-      return;
-    }
-    if (controller_mode_transition_pending_ || !rosWrenchModeConfirmed()) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "Withholding wrench until PX4 confirms thrust-and-torque Offboard control mode.");
-      return;
-    }
-
-    const uint64_t requested_period_us = static_cast<uint64_t>(
-      std::max(1.0, std::round(1e6 / inner_loop_rate_hz_)));
-    const uint64_t timestamp_tolerance_us = requested_period_us / 5;
-    if (next_controller_sample_timestamp_ > 0 &&
-      sample_timestamp + timestamp_tolerance_us < next_controller_sample_timestamp_)
+    const uint64_t nominal_period_us = static_cast<uint64_t>(
+      std::llround(1.0e6 / inner_loop_rate_hz_));
+    if (next_controller_sample_timestamp_ != 0 &&
+      sample_timestamp < next_controller_sample_timestamp_)
     {
       return;
     }
-    if (next_controller_sample_timestamp_ == 0) {
-      next_controller_sample_timestamp_ = sample_timestamp;
-    }
-    do {
-      next_controller_sample_timestamp_ += requested_period_us;
-    } while (next_controller_sample_timestamp_ <= sample_timestamp);
 
-    const auto stamp = now();
-    auto reference = controller_reference_sample_;
-    if (trajectory_started_ || !takeoff_before_trajectory_ || !offboard_enabled_) {
-      const double trajectory_time = std::max(0.0, (stamp - start_time_).seconds());
-      reference = reference_trajectory_.sample(trajectory_time);
+    double dt = 1.0 / inner_loop_rate_hz_;
+    if (last_controller_sample_timestamp_ != 0 &&
+      sample_timestamp > last_controller_sample_timestamp_)
+    {
+      dt = static_cast<double>(
+        sample_timestamp - last_controller_sample_timestamp_) * 1.0e-6;
     }
-    publishControllerSetpoint(reference, stamp, sample_timestamp);
+    last_controller_sample_timestamp_ = sample_timestamp;
+    if (next_controller_sample_timestamp_ == 0) {
+      next_controller_sample_timestamp_ = sample_timestamp + nominal_period_us;
+    } else {
+      do {
+        next_controller_sample_timestamp_ += nominal_period_us;
+      } while (next_controller_sample_timestamp_ <= sample_timestamp);
+    }
+
+    publishControllerSetpoint(
+      controller_reference_sample_, now(), sample_timestamp, dt);
   }
 
   geometric_controller::TrajectoryParameters trajectory_parameters_;
   geometric_controller::ReferenceTrajectory reference_trajectory_;
   geometric_controller::ControllerParams controller_params_;
-  geometric_controller::VelocityAccelerationFilter velocity_acceleration_filter_;
-  geometric_controller::VelocityAccelerationFilterParams
-    velocity_acceleration_filter_params_;
   geometric_controller::ControllerType active_controller_type_{
     geometric_controller::ControllerType::PX4_DIRECT};
   std::shared_ptr<geometric_controller::ControllerBase> active_controller_;
@@ -2058,6 +2071,8 @@ private:
   std::string setpoint_level_{"position"};
   double normalizedthrust_constant_{0.022058823529};
   double normalizedthrust_offset_{0.0};
+  double yaw_torque_cutoff_hz_{1.0};
+  double yaw_torque_filter_state_{0.0};
   Eigen::Vector3d normalizedtorque_constant_{
     Eigen::Vector3d(0.319957823650, 0.319957823650, 1.962568474088)};
 
@@ -2068,10 +2083,10 @@ private:
   std::string vehicle_command_topic_;
   std::string vehicle_status_topic_;
   std::string vehicle_local_position_topic_;
-  std::string vehicle_odometry_topic_;
+  std::string acceleration_indi_feedback_topic_;
+  std::string allocation_value_topic_;
   std::string vehicle_attitude_topic_;
   std::string vehicle_angular_velocity_topic_;
-  std::string vehicle_control_mode_topic_;
   std::string visualization_path_topic_;
   std::string visualization_pose_topic_;
   std::string visualization_vehicle_pose_topic_;
@@ -2083,7 +2098,6 @@ private:
   int vehicle_path_max_points_{600};
   double vehicle_path_min_distance_m_{0.05};
   double path_publish_time_s_{-std::numeric_limits<double>::infinity()};
-
   uint8_t target_system_{1};
   uint8_t target_component_{1};
   uint8_t source_system_{1};
@@ -2106,35 +2120,33 @@ private:
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
     vehicle_local_position_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr
-    vehicle_odometry_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleAccelerationIndiFeedback>::SharedPtr
+    acceleration_indi_feedback_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::AllocationValue>::SharedPtr
+    allocation_value_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr
     vehicle_attitude_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAngularVelocity>::SharedPtr
     vehicle_angular_velocity_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleControlMode>::SharedPtr
-    vehicle_control_mode_subscriber_;
-
   px4_msgs::msg::VehicleStatus vehicle_status_{};
   px4_msgs::msg::VehicleLocalPosition vehicle_local_position_{};
-  px4_msgs::msg::VehicleOdometry vehicle_odometry_{};
+  px4_msgs::msg::VehicleAccelerationIndiFeedback acceleration_indi_feedback_{};
+  px4_msgs::msg::AllocationValue allocation_value_{};
   px4_msgs::msg::VehicleAttitude vehicle_attitude_{};
   px4_msgs::msg::VehicleAngularVelocity vehicle_angular_velocity_{};
-  px4_msgs::msg::VehicleControlMode vehicle_control_mode_{};
   geometric_controller::TrajectorySample controller_reference_sample_{};
   std::vector<geometry_msgs::msg::PoseStamped> vehicle_path_;
   bool status_received_{false};
   bool local_position_received_{false};
-  bool vehicle_odometry_received_{false};
+  bool acceleration_indi_feedback_received_{false};
+  bool allocation_value_received_{false};
   bool vehicle_attitude_received_{false};
   bool vehicle_angular_velocity_received_{false};
-  bool vehicle_control_mode_received_{false};
-  bool controller_mode_transition_pending_{false};
   bool controller_reference_received_{false};
   bool parameters_pending_{false};
   bool trajectory_reset_pending_{false};
+  bool reference_parameters_pending_{false};
   bool controller_reset_pending_{false};
-  bool velocity_acceleration_filter_reset_pending_{false};
   bool trajectory_started_{false};
   bool start_transition_active_{false};
   bool start_transition_finished_{false};
@@ -2143,21 +2155,19 @@ private:
   bool auto_start_requested_{false};
   bool prefer_trajectory_type_{false};
   bool syncing_selector_parameters_{false};
+  bool yaw_torque_filter_initialized_{false};
+  uint64_t last_controller_sample_timestamp_{0};
+  uint64_t next_controller_sample_timestamp_{0};
   double last_auto_start_command_time_s_{-std::numeric_limits<double>::infinity()};
   double last_auto_start_wait_log_time_s_{-std::numeric_limits<double>::infinity()};
   double last_takeoff_progress_log_time_s_{-std::numeric_limits<double>::infinity()};
   double last_status_topic_warning_time_s_{-std::numeric_limits<double>::infinity()};
   int trajectory_type_{1};
   std::array<std::array<double, 6>, 3> start_transition_coefficients_{};
+  std::array<double, 6> start_transition_yaw_coefficients_{};
   rclcpp::Time start_transition_start_time_;
   uint64_t offboard_heartbeat_counter_{0};
   rclcpp::Time start_time_;
-  rclcpp::Time last_controller_update_time_;
-  uint64_t last_controller_sample_timestamp_{0};
-  uint64_t next_controller_sample_timestamp_{0};
-  uint64_t last_velocity_filter_timestamp_sample_{0};
-  Eigen::Vector3d filtered_velocity_acceleration_ned_{Eigen::Vector3d::Zero()};
-  bool filtered_velocity_acceleration_valid_{false};
 };
 
 int main(int argc, char * argv[])

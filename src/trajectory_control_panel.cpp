@@ -20,6 +20,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -151,7 +152,7 @@ private:
     addControllerCombo(controller_form);
     addCtrlModeCombo(controller_form);
     addDouble(
-      controller_form, "outer loop rate", "outer_loop_rate_hz", 125.0, 10.0, 250.0,
+      controller_form, "outer loop rate", "outer_loop_rate_hz", 100.0, 10.0, 250.0,
       1.0, 1, " Hz");
     addDouble(
       controller_form, "inner loop rate", "inner_loop_rate_hz", 250.0, 50.0, 250.0,
@@ -168,9 +169,27 @@ private:
     addDouble(controller_form, "KΩ roll", "KOmega_r", 50.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(controller_form, "KΩ pitch", "KOmega_p", 50.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(controller_form, "KΩ yaw", "KOmega_y", 3.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kp x", "indi_Kp_x", 10.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kp y", "indi_Kp_y", 10.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kp z", "indi_Kp_z", 10.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kv x", "indi_Kv_x", 6.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kv y", "indi_Kv_y", 6.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "INDI Kv z", "indi_Kv_z", 6.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(
-      controller_form, "max feedback accel", "max_acc", 45.0, 1.0, 100.0, 0.1, 2,
-      " m/s²");
+      controller_form, "INDI Kθ roll", "indi_Ktheta_r", 150.0, 0.0, 500.0, 1.0, 1, "");
+    addDouble(
+      controller_form, "INDI Kθ pitch", "indi_Ktheta_p", 150.0, 0.0, 500.0, 1.0, 1, "");
+    addDouble(
+      controller_form, "INDI Kθ yaw", "indi_Ktheta_y", 3.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(
+      controller_form, "INDI Kω roll", "indi_Komega_r", 20.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(
+      controller_form, "INDI Kω pitch", "indi_Komega_p", 20.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(
+      controller_form, "INDI Kω yaw", "indi_Komega_y", 8.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(
+      controller_form, "yaw torque LPF", "yaw_torque_cutoff_hz", 1.0, 0.0, 100.0,
+      0.1, 2, " Hz");
     addDouble(controller_form, "mass", "mass", 0.75, 0.05, 50.0, 0.001, 3, " kg");
     addDouble(
       controller_form, "inertia x", "inertia_x", 0.0025, 0.00001, 10.0,
@@ -181,21 +200,8 @@ private:
     addDouble(
       controller_form, "inertia z", "inertia_z", 0.0043, 0.00001, 10.0,
       0.0001, 5, " kg·m²");
-    addDouble(
-      controller_form, "INDI cutoff", "indi_filter_cutoff_hz", 30.0, 0.0, 100.0,
-      1.0, 1, " Hz");
-    addDouble(
-      controller_form, "INDI velocity LPF", "indi_velocity_lpf_hz", 0.0, 0.0, 50.0,
-      0.5, 1, " Hz");
-    addDouble(
-      controller_form, "INDI velocity notch", "indi_velocity_notch_hz", 0.0, 0.0, 50.0,
-      0.5, 1, " Hz");
-    addDouble(
-      controller_form, "INDI notch bandwidth", "indi_velocity_notch_bandwidth_hz", 5.0, 0.0,
-      50.0, 0.5, 1, " Hz");
-    addDouble(
-      controller_form, "INDI velocity D LPF", "indi_velocity_derivative_lpf_hz", 5.0, 0.0,
-      50.0, 0.5, 1, " Hz");
+    addBool(
+      controller_form, "acceleration INDI", "indi_acceleration_enabled", true);
     controller_layout->addWidget(controller_group);
 
     auto * normalization_group = new QGroupBox("PX4 normalization constants");
@@ -272,8 +278,13 @@ private:
         }
     });
 
+    QObject::connect(omega_slider_, &QSlider::sliderPressed, [this]() {
+        omega_slider_dirty_ = true;
+    });
+
     QObject::connect(omega_slider_, &QSlider::sliderReleased, [this]() {
-        if (!updating_ui_) {
+        if (!updating_ui_ && omega_slider_dirty_) {
+          omega_slider_dirty_ = false;
           setDoubleParameter("omega_value", sliderToOmega(omega_slider_->value()));
         }
     });
@@ -289,8 +300,15 @@ private:
         }
       });
 
+    if (auto * editor = omega_spin_->findChild<QLineEdit *>()) {
+      QObject::connect(editor, &QLineEdit::textEdited, [this](const QString &) {
+          omega_spin_dirty_ = true;
+      });
+    }
+
     QObject::connect(omega_spin_, &QDoubleSpinBox::editingFinished, [this]() {
-        if (!updating_ui_) {
+        if (!updating_ui_ && omega_spin_dirty_) {
+          omega_spin_dirty_ = false;
           setDoubleParameter("omega_value", omega_spin_->value());
         }
       });
@@ -436,9 +454,16 @@ private:
     double_controls_[parameter_name] = spin;
     form->addRow(label, spin);
 
+    if (auto * editor = spin->findChild<QLineEdit *>()) {
+      QObject::connect(
+        editor, &QLineEdit::textEdited,
+        [spin](const QString &) {spin->setProperty("user_dirty", true);});
+    }
+
     QObject::connect(spin, &QDoubleSpinBox::editingFinished,
       [this, parameter_name, spin]() {
-        if (!updating_ui_) {
+        if (!updating_ui_ && spin->property("user_dirty").toBool()) {
+          spin->setProperty("user_dirty", false);
           setDoubleParameter(parameter_name, spin->value());
         }
     });
@@ -470,7 +495,17 @@ private:
   {
     ros_timer_ = new QTimer(window_.get());
     QObject::connect(ros_timer_, &QTimer::timeout, [this]() {
-        rclcpp::spin_some(node_);
+        if (!rclcpp::ok()) {
+          ros_timer_->stop();
+          QApplication::quit();
+          return;
+        }
+        try {
+          rclcpp::spin_some(node_);
+        } catch (const rclcpp::exceptions::RCLError &) {
+          ros_timer_->stop();
+          QApplication::quit();
+        }
     });
     ros_timer_->start(20);
 
@@ -576,7 +611,7 @@ private:
 
   void setControllerTypeUi(int type)
   {
-    const int clamped = std::clamp(type, 0, 8);
+    const int clamped = std::clamp(type, 0, 6);
     const QSignalBlocker blocker(controller_combo_);
     const int index = controller_combo_->findData(clamped);
     if (index >= 0) {
@@ -681,6 +716,8 @@ private:
   bool updating_ui_{false};
   bool initial_sync_done_{false};
   bool sync_in_progress_{false};
+  bool omega_slider_dirty_{false};
+  bool omega_spin_dirty_{false};
 };
 
 int main(int argc, char * argv[])
@@ -688,10 +725,12 @@ int main(int argc, char * argv[])
   rclcpp::init(argc, argv);
   QApplication app(argc, argv);
 
-  TrajectoryControlPanel panel;
-  panel.show();
-
-  const int result = app.exec();
+  int result = 0;
+  {
+    TrajectoryControlPanel panel;
+    panel.show();
+    result = app.exec();
+  }
   rclcpp::shutdown();
   return result;
 }

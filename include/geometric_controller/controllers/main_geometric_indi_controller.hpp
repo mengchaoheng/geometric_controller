@@ -36,15 +36,9 @@ public:
   void reset(const VehicleState & state) override;
 
 private:
-  bool initialized_{false};
-  Eigen::Vector3d previous_velocity_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d previous_omega_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d previous_torque_{Eigen::Vector3d::Zero()};
-  double previous_thrust_{0.0};
-  SecondOrderFilterState acceleration_filter_;
-  SecondOrderFilterState omega_filter_;
-  SecondOrderFilterState thrust_axis_filter_;
-  SecondOrderFilterState torque_filter_;
+  Eigen::Vector3d commanded_body_z_force_{Eigen::Vector3d::Zero()};
+  bool force_command_valid_{false};
+  double outer_loop_elapsed_s_{0.0};
 };
 
 }  // namespace geometric_controller

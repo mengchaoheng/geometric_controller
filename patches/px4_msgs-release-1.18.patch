@@ -1,0 +1,39 @@
+diff --git a/msg/VehicleAccelerationIndiFeedback.msg b/msg/VehicleAccelerationIndiFeedback.msg
+new file mode 100644
+--- /dev/null
++++ b/msg/VehicleAccelerationIndiFeedback.msg
+@@ -0,0 +1,6 @@
++uint32 MESSAGE_VERSION = 0
++
++uint64 timestamp
++uint64 timestamp_sample # vehicle_local_position sample used by the velocity-derivative filters
++
++float32[3] xyz # filtered NED velocity derivative used by mc_pos_control acceleration INDI [m/s^2]
+diff --git a/msg/AllocationValue.msg b/msg/AllocationValue.msg
+new file mode 100644
+--- /dev/null
++++ b/msg/AllocationValue.msg
+@@ -0,0 +1,10 @@
++uint32 MESSAGE_VERSION = 0
++
++uint64 timestamp
++uint64 timestamp_sample # timestamp of the torque setpoint that triggered allocation
++
++float32[3] raw_allocated_torque # Unfiltered body-FRD torque from final actuator setpoints [N m]
++float32[3] raw_allocated_force  # Unfiltered body-FRD force from final actuator setpoints [N]
++float32[3] allocated_torque     # Filtered body-FRD torque from final actuator setpoints [N m]
++float32[3] allocated_force      # Filtered body-FRD force from final actuator setpoints [N]
++float32[3] torque_setpoint_scale # Physical torque to normalized torque setpoint scale
+diff --git a/msg/VehicleTorqueSetpoint.msg b/msg/VehicleTorqueSetpoint.msg
+--- a/msg/VehicleTorqueSetpoint.msg
++++ b/msg/VehicleTorqueSetpoint.msg
+@@ -4,5 +4,9 @@ uint64 timestamp_sample # timestamp of the data sample on which this message is
+ 
+ float32[3] xyz          # torque setpoint about X, Y, Z body axis (normalized)
+ 
++# Optional higher-priority INDI component for PCA.
++float32[3] xyz_indi_feedback # higher-priority INDI torque component (normalized)
++bool xyz_indi_feedback_valid # true when this setpoint contains an INDI priority split
++
+ # TOPICS vehicle_torque_setpoint
+ # TOPICS vehicle_torque_setpoint_virtual_fw vehicle_torque_setpoint_virtual_mc

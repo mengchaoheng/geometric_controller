@@ -33,10 +33,8 @@ enum class ControllerType
   MAIN_LEE = 2,
   MAIN_JOHNSON = 3,
   MAIN_SUN_DFBC = 4,
-  MAIN_SUN_DFBC_INDI = 5,
-  MAIN_TAL = 6,
-  MAIN_GEOMETRIC_INDI = 7,
-  PX4_DIRECT = 8,
+  MAIN_GEOMETRIC_INDI = 5,
+  PX4_DIRECT = 6,
 };
 
 struct VehicleState
@@ -44,11 +42,14 @@ struct VehicleState
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
   Eigen::Vector3d acceleration = Eigen::Vector3d::Zero();
+  // Filtered allocated force feedback, converted to the paper's positive
+  // T*b_z convention in NED.
+  Eigen::Vector3d applied_thrust_axis_force = Eigen::Vector3d::Zero();
+  // Filtered allocated physical torque feedback in body FRD [N m].
+  Eigen::Vector3d applied_torque = Eigen::Vector3d::Zero();
   Eigen::Vector3d body_rate = Eigen::Vector3d::Zero();
   Eigen::Vector3d angular_acceleration = Eigen::Vector3d::Zero();
   Eigen::Vector4d attitude = Eigen::Vector4d(1.0, 0.0, 0.0, 0.0);
-  bool acceleration_valid = false;
-  bool angular_acceleration_valid = false;
   double yaw = 0.0;
 };
 
@@ -72,36 +73,39 @@ struct ControllerParams
   Eigen::Vector3d drag = Eigen::Vector3d::Zero();
   Eigen::Vector3d Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
   Eigen::Vector3d Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
-  // PX4/Gazebo includes allocation, motor dynamics, and DDS feedback latency
-  // that are absent from main.m's ideal rigid body. The yaw gains are tuned
-  // separately for the df-main Iris direct-wrench path.
+  // PX4/Gazebo includes allocation, motor dynamics, and transport/sample
+  // timing that are absent from main.m's ideal rigid body. The yaw gains are
+  // tuned separately for the df-main Iris direct-wrench path.
   Eigen::Vector3d KR = Eigen::Vector3d(150.0, 150.0, 80.0);
   Eigen::Vector3d KOmega = Eigen::Vector3d(50.0, 50.0, 3.0);
+  // main.tex K_theta and K_omega for Geometric INDI. These are independent
+  // from the gains of the non-incremental controllers.
+  Eigen::Vector3d indi_Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
+  Eigen::Vector3d indi_Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
+  Eigen::Vector3d indi_Ktheta = Eigen::Vector3d(150.0, 150.0, 3.0);
+  Eigen::Vector3d indi_Komega = Eigen::Vector3d(20.0, 20.0, 8.0);
   Eigen::Matrix3d inertia =
     (Eigen::Vector3d(0.0025, 0.0021, 0.0043)).asDiagonal();
-  double max_feedback_acc = 45.0;
+  // False selects direct geometric thrust while retaining rotational INDI.
+  // True enables the complete main.tex translational and rotational laws.
+  bool indi_acceleration_enabled = true;
+  double outer_loop_rate_hz = 100.0;
   double mass = 0.75;
-  double indi_filter_cutoff_hz = 30.0;
 };
 
 struct ControllerCommand
 {
   Eigen::Vector3d torque = Eigen::Vector3d::Zero();
+  // Higher-priority INDI feedback component of torque, in physical N*m.
+  // The transport layer converts it with the same processing as torque.
+  Eigen::Vector3d indi_torque_feedback = Eigen::Vector3d::Zero();
+  bool indi_torque_feedback_valid = false;
   Eigen::Vector4d attitude = Eigen::Vector4d(1.0, 0.0, 0.0, 0.0);
   Eigen::Vector3d reference_position = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_acceleration = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_body_rate = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_angular_acceleration = Eigen::Vector3d::Zero();
   double collective_thrust = 0.0;
-};
-
-struct SecondOrderFilterState
-{
-  Eigen::Vector3d x1 = Eigen::Vector3d::Zero();
-  Eigen::Vector3d x2 = Eigen::Vector3d::Zero();
-  Eigen::Vector3d y1 = Eigen::Vector3d::Zero();
-  Eigen::Vector3d y2 = Eigen::Vector3d::Zero();
-  bool initialized = false;
 };
 
 inline double clampUnit(double value)

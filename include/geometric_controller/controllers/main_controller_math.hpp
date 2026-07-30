@@ -58,7 +58,6 @@ Eigen::Vector3d leeSO3Error(const Eigen::Matrix3d & R, const Eigen::Matrix3d & R
 Eigen::Vector3d quaternionAttitudeError(const Eigen::Vector4d & q, const Eigen::Vector4d & qd);
 Eigen::Vector4d quaternionMultiply(const Eigen::Vector4d & q, const Eigen::Vector4d & p);
 Eigen::Vector4d matrixToQuaternion(const Eigen::Matrix3d & R);
-Eigen::Vector4d attitudeFromSpecificForce(const Eigen::Vector3d & specific_force, double yaw);
 Eigen::Matrix3d attitudeFromUnitBodyZAndHeading(
   const Eigen::Vector3d & b3d,
   const Eigen::Vector3d & xC);
@@ -73,29 +72,9 @@ AttitudeDerivatives attitudeDerivativesFromUnitBodyZAndHeading(
   const Eigen::Vector3d & xC,
   const Eigen::Vector3d & xCDot,
   const Eigen::Vector3d & xCDDot);
-Eigen::Vector3d closedLoopSpecificForceDerivative(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double thrust_accel);
-Eigen::Vector3d closedLoopSpecificForceSecondDerivative(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double thrust_accel,
-  const Eigen::Vector3d & specific_force_dot);
-Eigen::Vector3d referenceBodyRateFromForce(
-  const Eigen::Vector3d & specific_force,
-  const Eigen::Vector3d & specific_force_dot, double yaw,
-  double yaw_rate);
 SunReferenceRates sunFlatnessReferenceRates(
   const VehicleState & state, const FlatReference & reference,
   double thrust_accel);
-Eigen::Vector3d attitudeRateFeedback(
-  const Eigen::Vector3d & attitude_error,
-  const ControllerParams & params);
-Eigen::Vector3d saturatedFeedbackAcceleration(
-  const Eigen::Vector3d & feedback,
-  double max_feedback_acc);
-Eigen::Vector3d outerLoopAcceleration(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params);
 
 }  // namespace main_math
 }  // namespace geometric_controller

@@ -88,6 +88,8 @@ public:
   explicit ReferenceTrajectory(const TrajectoryParameters & parameters);
 
   void setParameters(const TrajectoryParameters & parameters);
+  void setParametersWithOmegaTransition(
+    const TrajectoryParameters & parameters, double time_s, double duration_s);
   const TrajectoryParameters & parameters() const;
   TrajectorySample sample(double time_s) const;
   double theta(double time_s) const;
@@ -127,6 +129,12 @@ private:
   void applyYaw(TrajectorySample & sample) const;
 
   TrajectoryParameters parameters_;
+  bool omega_transition_configured_{false};
+  double omega_transition_start_time_s_{0.0};
+  double omega_transition_duration_s_{0.0};
+  double omega_transition_start_theta_{0.0};
+  double omega_transition_start_value_{0.0};
+  double omega_transition_target_value_{0.0};
 };
 
 std::string normalizeTrajectoryType(const std::string & type);
