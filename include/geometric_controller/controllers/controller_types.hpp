@@ -78,12 +78,6 @@ struct ControllerParams
   // tuned separately for the df-main Iris direct-wrench path.
   Eigen::Vector3d KR = Eigen::Vector3d(150.0, 150.0, 80.0);
   Eigen::Vector3d KOmega = Eigen::Vector3d(50.0, 50.0, 3.0);
-  // main.tex K_theta and K_omega for Geometric INDI. These are independent
-  // from the gains of the non-incremental controllers.
-  Eigen::Vector3d indi_Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
-  Eigen::Vector3d indi_Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
-  Eigen::Vector3d indi_Ktheta = Eigen::Vector3d(150.0, 150.0, 3.0);
-  Eigen::Vector3d indi_Komega = Eigen::Vector3d(20.0, 20.0, 8.0);
   Eigen::Matrix3d inertia =
     (Eigen::Vector3d(0.0025, 0.0021, 0.0043)).asDiagonal();
   // False selects direct geometric thrust while retaining rotational INDI.

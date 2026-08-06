@@ -184,6 +184,61 @@ TEST(ReferenceTrajectory, OmegaTransitionPreservesReferenceDerivatives)
   EXPECT_NEAR(after.yaw_acceleration, before.yaw_acceleration, 1e-12);
 }
 
+TEST(ReferenceTrajectory, PreviewIsClosedAfterAnOmegaTransition)
+{
+  geometric_controller::TrajectoryParameters parameters;
+  parameters.traj_name = "figure8_horizontal";
+  parameters.omega_value = 0.15;
+  geometric_controller::ReferenceTrajectory trajectory(parameters);
+
+  auto updated = parameters;
+  updated.omega_value = 0.5;
+  constexpr double transition_time = 60.0;
+  trajectory.setParametersWithOmegaTransition(updated, transition_time, 1.0);
+
+  const double preview_start = transition_time + 2.0;
+  const double duration = trajectory.previewDuration();
+  const auto first = trajectory.sample(preview_start);
+  const auto last = trajectory.sample(preview_start + duration);
+  for (size_t axis = 0; axis < 3; ++axis) {
+    EXPECT_NEAR(last.position[axis], first.position[axis], 1e-12);
+  }
+}
+
+TEST(MainSunDFBCController, UsesPreviousCollectiveThrustForFlatnessRates)
+{
+  geometric_controller::ControllerParams params;
+  auto state = hoverState();
+  auto reference = hoverReference();
+  auto controller = geometric_controller::makeController(
+    geometric_controller::ControllerType::MAIN_SUN_DFBC);
+
+  controller->reset(state);
+  (void)controller->update(state, reference, params, 0.004);
+
+  reference.acceleration.z() = 3.0;
+  reference.jerk.x() = 1.0;
+  const auto command = controller->update(state, reference, params, 0.004);
+  EXPECT_NEAR(command.desired_body_rate.y(), -1.0 / params.gravity.z(), 1e-12);
+}
+
+TEST(ReferenceTrajectory, ZeroOmegaFreezesTrajectoryAtInitialPhase)
+{
+  geometric_controller::TrajectoryParameters parameters;
+  parameters.traj_name = "figure8_horizontal";
+  parameters.omega_value = 0.0;
+  geometric_controller::ReferenceTrajectory trajectory(parameters);
+
+  const auto initial = trajectory.sample(0.0);
+  const auto later = trajectory.sample(10.0);
+  EXPECT_NEAR(trajectory.theta(10.0), trajectory.theta(0.0), 1e-12);
+  for (size_t axis = 0; axis < 3; ++axis) {
+    EXPECT_NEAR(later.position[axis], initial.position[axis], 1e-12);
+    EXPECT_NEAR(later.velocity[axis], 0.0, 1e-12);
+    EXPECT_NEAR(later.acceleration[axis], 0.0, 1e-12);
+  }
+}
+
 TEST(FullWrenchControllers, GeometricIndiImplementsRotationalEquations)
 {
   geometric_controller::ControllerParams params;
@@ -200,15 +255,11 @@ TEST(FullWrenchControllers, GeometricIndiImplementsRotationalEquations)
   controller->reset(state);
   const auto first = controller->update(state, reference, params, 0.004);
   const Eigen::Vector3d expected_acceleration =
-    -(params.indi_Komega.asDiagonal() * state.body_rate);
-  const Eigen::Vector3d expected_feedback =
-    state.applied_torque -
-    params.inertia * state.angular_acceleration;
+    -(params.KOmega.asDiagonal() * state.body_rate);
   EXPECT_TRUE(first.torque.isApprox(
       state.applied_torque + params.inertia *
       (expected_acceleration - state.angular_acceleration), 1e-12));
-  EXPECT_TRUE(first.indi_torque_feedback_valid);
-  EXPECT_TRUE(first.indi_torque_feedback.isApprox(expected_feedback, 1e-12));
+  EXPECT_FALSE(first.indi_torque_feedback_valid);
 
   const auto command = controller->update(state, reference, params, 0.004);
   EXPECT_TRUE(command.desired_angular_acceleration.isApprox(
@@ -216,8 +267,7 @@ TEST(FullWrenchControllers, GeometricIndiImplementsRotationalEquations)
   EXPECT_TRUE(command.torque.isApprox(
       state.applied_torque + params.inertia *
       (expected_acceleration - state.angular_acceleration), 1e-12));
-  EXPECT_TRUE(command.indi_torque_feedback_valid);
-  EXPECT_TRUE(command.indi_torque_feedback.isApprox(expected_feedback, 1e-12));
+  EXPECT_FALSE(command.indi_torque_feedback_valid);
 }
 
 TEST(FullWrenchControllers, GeometricIndiRunsForceAtFixedOuterLoopRate)
@@ -243,13 +293,11 @@ TEST(FullWrenchControllers, GeometricIndiRunsForceAtFixedOuterLoopRate)
     params.mass * state.acceleration.z(), 1e-12);
 }
 
-TEST(FullWrenchControllers, GeometricIndiUsesIndependentOuterLoopGains)
+TEST(FullWrenchControllers, GeometricIndiUsesSharedControllerGains)
 {
   geometric_controller::ControllerParams params;
-  params.Kp = Eigen::Vector3d::Zero();
-  params.Kv = Eigen::Vector3d::Zero();
-  params.indi_Kp = Eigen::Vector3d(2.0, 3.0, 4.0);
-  params.indi_Kv = Eigen::Vector3d(5.0, 6.0, 7.0);
+  params.Kp = Eigen::Vector3d(2.0, 3.0, 4.0);
+  params.Kv = Eigen::Vector3d(5.0, 6.0, 7.0);
   params.indi_acceleration_enabled = false;
 
   auto state = hoverState();
@@ -264,8 +312,8 @@ TEST(FullWrenchControllers, GeometricIndiUsesIndependentOuterLoopGains)
   indi->reset(state);
   const auto indi_command = indi->update(state, reference, params, 0.004);
   const Eigen::Vector3d expected_acceleration =
-    params.indi_Kp.asDiagonal() * (reference.position - state.position) +
-    params.indi_Kv.asDiagonal() * (reference.velocity - state.velocity);
+    params.Kp.asDiagonal() * (reference.position - state.position) +
+    params.Kv.asDiagonal() * (reference.velocity - state.velocity);
   EXPECT_TRUE(indi_command.desired_acceleration.isApprox(expected_acceleration, 1e-12));
   EXPECT_NEAR(
     indi_command.collective_thrust,
@@ -276,10 +324,10 @@ TEST(FullWrenchControllers, GeometricIndiClosesPhysicalWrenchLoop)
 {
   constexpr double dt = 0.005;
   geometric_controller::ControllerParams params;
-  params.indi_Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
-  params.indi_Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
-  params.indi_Ktheta = Eigen::Vector3d(150.0, 150.0, 3.0);
-  params.indi_Komega = Eigen::Vector3d(20.0, 20.0, 8.0);
+  params.Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
+  params.Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
+  params.KR = Eigen::Vector3d(150.0, 150.0, 3.0);
+  params.KOmega = Eigen::Vector3d(20.0, 20.0, 8.0);
   // This ideal plant has no actuator dynamics; the test isolates the INDI
   // equations and multi-rate sample-and-hold behavior.
   params.indi_acceleration_enabled = true;

@@ -21,7 +21,8 @@ visualization-only.
 Modes 0–5 set `OffboardControlMode.thrust_and_torque=true` and publish
 `VehicleThrustSetpoint` plus `VehicleTorqueSetpoint`. They bypass the PX4
 position, attitude, and rate controllers while retaining PX4 control allocation
-and actuator output. Mode 6 is the default baseline.
+and actuator output. Mode 1 is the default ROS baseline; mode 6 is available
+for an independent PX4-chain check.
 
 ## Installation
 
@@ -49,12 +50,9 @@ git -C px4_msgs apply \
   ../geometric_controller/patches/px4_msgs-release-1.18.patch
 ```
 
-The patch contains three interface changes:
-
-1. Add `VehicleAccelerationIndiFeedback.msg`.
-2. Add `AllocationValue.msg`.
-3. Extend `VehicleTorqueSetpoint.msg` with `xyz_indi_feedback[3]` and
-   `xyz_indi_feedback_valid`.
+The patch adds `AllocationValue.msg` and extends `VehicleTorqueSetpoint.msg`
+with the optional PCA fields. PCA is currently disabled; `AllocationValue` is
+used for the final allocated-wrench feedback.
 
 Field order and types must match the messages in `df-main`.
 
@@ -68,19 +66,11 @@ colcon build --packages-select geometric_controller --cmake-clean-cache
 
 ## PX4 DDS rates
 
-The PX4 branch publishes the velocity-derivative result already computed by
-`mc_pos_control::set_vehicle_states()` as `VehicleAccelerationIndiFeedback`; this does
-not change the position-control law. The DDS configuration is:
+Mode 5 uses the standard state topics plus PX4's final allocated-wrench
+feedback. Remove the DDS rate limit from `vehicle_attitude` and
+`vehicle_local_position`, and publish `allocation_value` without a rate limit:
 
 ```yaml
-- topic: /fmu/out/vehicle_acceleration_indi_feedback
-  type: px4_msgs::msg::VehicleAccelerationIndiFeedback
-  rate_limit: unlimited
-
-- topic: /fmu/out/allocation_value
-  type: px4_msgs::msg::AllocationValue
-  rate_limit: unlimited
-
 - topic: /fmu/out/vehicle_angular_velocity
   type: px4_msgs::msg::VehicleAngularVelocity
   rate_limit: unlimited
@@ -92,6 +82,9 @@ not change the position-control law. The DDS configuration is:
 - topic: /fmu/out/vehicle_local_position
   type: px4_msgs::msg::VehicleLocalPosition
   rate_limit: unlimited
+
+- topic: /fmu/out/allocation_value
+  type: px4_msgs::msg::AllocationValue
 ```
 
 Run `make px4_sitl` after changing the file. `unlimited` removes DDS-side
@@ -99,7 +92,7 @@ downsampling; it does not upsample a source. PX4 callbacks overwrite cached
 samples. A 100 Hz timer updates the reference, while translational INDI updates
 every 10 ms and holds its thrust vector between updates. Each fresh angular-rate
 sample can trigger rotational INDI, capped by `inner_loop_rate_hz=250`; every
-update reads the latest cached state and allocation feedback.
+update reads the latest cached state and allocated-wrench feedback.
 
 Native simulation and hardware rates may therefore differ. A hardware attitude
 source near 200 Hz is reused by some 250 Hz rotational updates as part of this
@@ -110,8 +103,8 @@ This removes waiting introduced by a DDS rate gate, but it cannot remove PX4
 filtering, scheduling, or actuator delay. The controller-specific profile also
 reduces unused traffic: `sensor_combined` to 20 Hz, status topics to 5 Hz, and
 GPS/global position to 10 Hz. If the DDS transport is bandwidth-limited, cap
-`vehicle_angular_velocity` and `allocation_value` at 250 Hz while retaining the
-other control feedback topics as `unlimited`.
+`vehicle_angular_velocity` at 250 Hz while retaining the other control feedback
+topics as `unlimited`.
 
 ## Geometric INDI
 
@@ -131,22 +124,22 @@ a_c = Kp (p_r - p) + Kv (v_r - v) + a_r
 ROS subscriptions cache the newest PX4 data; the angular-rate callback also
 triggers the rotational loop at the configured maximum rate:
 
-- `a_0` is the latest `VehicleAccelerationIndiFeedback`: PX4's NED velocity notch,
-  velocity LPF, finite difference, and derivative LPF output. ROS does not
-  filter it again.
+- `a_0` uses `VehicleLocalPosition.ax/ay/az`, exactly like
+  `MPC_INDI_A_SRC=1`, followed by a local second-order Butterworth LPF.
 - `α_0` is `VehicleAngularVelocity.xyz_derivative`, already differentiated and
   filtered by PX4's native IMU pipeline.
-- `(T b_z)_0` and `τ_0` use the filtered physical force and moment in the
-  latest `AllocationValue`. The body-FRD force is rotated to NED and converted
-  to the paper's positive `T b_z` convention.
+- `(T b_z)_0` and `τ_0` use `AllocationValue.allocated_force` and
+  `allocated_torque`: the final actuator allocation reconstructed and filtered
+  by PX4. Body-FRD force is rotated to NED and converted to the paper's positive
+  `T b_z` convention. No local wrench reconstruction, extra actuator LPF, or
+  artificial feedback delay is used.
 - The translational equation runs at 100 Hz. Fresh angular-rate samples trigger
   the rotational equation up to 250 Hz. Both layers read the newest cache from
   the other topics; equal timestamps across sources are not required.
 
-The IMU `VehicleAcceleration` is not used. The `mc_pos_control` module updates
-and publishes this feedback on local-position samples even while it does not
-own the control mode. PX4 `MC_INDI_RATE_EN` is not used by mode 5 because ROS
-publishes the final wrench and bypasses the PX4 rate controller.
+The IMU `VehicleAcceleration` and PX4 `AccelerationIndiStatus` are not used.
+PX4 `MC_INDI_RATE_EN` is also not used by mode 5 because ROS publishes the final
+wrench and bypasses the PX4 rate controller.
 
 `indi_acceleration_enabled=true` is the complete algorithm and the default.
 Set it to `false` to retain rotational INDI with direct geometric thrust for
@@ -157,22 +150,16 @@ As described in the state-estimation section of `main.tex`, the control input
 may use a lower cutoff than the state derivative to reduce jitter. Filter
 frequencies tune bandwidth and noise; they are not a mode-5 enable condition.
 
-### PCA priority fields
+### PCA priority fields (currently disabled)
 
-Mode 5 publishes:
+Mode 5 currently publishes only the total torque and marks the PCA split invalid:
 
 ```text
 VehicleTorqueSetpoint.xyz = τ_c
-τ_H = τ_0 - J α_0
-τ_L = J α_c
-τ_c = τ_H + τ_L
-VehicleTorqueSetpoint.xyz_indi_feedback = τ_H
+VehicleTorqueSetpoint.xyz_indi_feedback_valid = false
 ```
 
-Both moment fields use the same fixed
-`normalizedtorque_constant_r/p/y`. The PX4 allocator decides whether to use
-the optional priority component. Without PCA, the total moment remains
-available in `xyz`.
+This keeps PCA out of the loop while the base INDI controller is validated.
 
 ## Normalization
 
@@ -184,10 +171,8 @@ T_normalized = normalizedthrust_constant * T / mass
                     normalizedtorque_constant_y) τ
 ```
 
-These fixed scales must match the airframe. The controller does not replace
-them at runtime with `AllocationValue.torque_setpoint_scale`. The values are
-effectively equal in current SITL; real-hardware DDS latency still needs
-measurement.
+These fixed scales must match the airframe. The current SITL values come from
+the Iris effectiveness matrix; verify them again for a different airframe.
 
 ## Build, test, and launch
 
@@ -223,16 +208,14 @@ edited, so multi-digit values such as `50` can be entered normally.
 Important INDI parameters:
 
 - `indi_acceleration_enabled`
+- `indi_acceleration_cutoff_hz` (EKF acceleration LPF, default 8 Hz)
 - `outer_loop_rate_hz` (default 100 Hz)
 - `inner_loop_rate_hz` (default maximum 250 Hz)
-- `indi_Kp_*` and `indi_Kv_*`, independent from other controllers' `Kp/Kv`
-- `indi_Ktheta_*` and `indi_Komega_*`
-- `yaw_torque_cutoff_hz`, the common yaw-moment output LPF for the direct
-  wrench path (1 Hz by default; 0 disables it)
+- `Kp_*`, `Kv_*`, `KR_*`, and `KOmega_*`; modes 1 and 5 use this same gain set,
+  matching `main.m`
 
-PX4 parameters `MPC_VEL_LP`, `MPC_VEL_NF_FRQ`, `MPC_VEL_NF_BW`, and
-`MPC_VELD_LP` configure the translational feedback filters. ROS does not expose
-a duplicate set.
+The default 8 Hz acceleration cutoff matches this Iris profile's
+`MPC_INDI_A_LP=8` setting for PX4 source 1.
 
 ```bash
 ros2 param set /trajectory_offboard_node controller_type 5
@@ -244,10 +227,8 @@ ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
 
 ```bash
 ros2 topic hz /fmu/out/vehicle_local_position
-ros2 topic hz /fmu/out/vehicle_acceleration_indi_feedback
 ros2 topic hz /fmu/out/vehicle_attitude
 ros2 topic hz /fmu/out/vehicle_angular_velocity
-ros2 topic hz /fmu/out/allocation_value
 ros2 topic hz /fmu/in/vehicle_torque_setpoint
 ```
 

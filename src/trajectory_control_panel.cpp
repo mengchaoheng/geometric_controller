@@ -169,27 +169,6 @@ private:
     addDouble(controller_form, "KΩ roll", "KOmega_r", 50.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(controller_form, "KΩ pitch", "KOmega_p", 50.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(controller_form, "KΩ yaw", "KOmega_y", 3.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kp x", "indi_Kp_x", 10.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kp y", "indi_Kp_y", 10.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kp z", "indi_Kp_z", 10.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kv x", "indi_Kv_x", 6.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kv y", "indi_Kv_y", 6.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "INDI Kv z", "indi_Kv_z", 6.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(
-      controller_form, "INDI Kθ roll", "indi_Ktheta_r", 150.0, 0.0, 500.0, 1.0, 1, "");
-    addDouble(
-      controller_form, "INDI Kθ pitch", "indi_Ktheta_p", 150.0, 0.0, 500.0, 1.0, 1, "");
-    addDouble(
-      controller_form, "INDI Kθ yaw", "indi_Ktheta_y", 3.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(
-      controller_form, "INDI Kω roll", "indi_Komega_r", 20.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(
-      controller_form, "INDI Kω pitch", "indi_Komega_p", 20.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(
-      controller_form, "INDI Kω yaw", "indi_Komega_y", 8.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(
-      controller_form, "yaw torque LPF", "yaw_torque_cutoff_hz", 1.0, 0.0, 100.0,
-      0.1, 2, " Hz");
     addDouble(controller_form, "mass", "mass", 0.75, 0.05, 50.0, 0.001, 3, " kg");
     addDouble(
       controller_form, "inertia x", "inertia_x", 0.0025, 0.00001, 10.0,
@@ -202,6 +181,9 @@ private:
       0.0001, 5, " kg·m²");
     addBool(
       controller_form, "acceleration INDI", "indi_acceleration_enabled", true);
+    addDouble(
+      controller_form, "INDI accel LPF", "indi_acceleration_cutoff_hz", 8.0,
+      0.0, 50.0, 0.5, 1, " Hz");
     controller_layout->addWidget(controller_group);
 
     auto * normalization_group = new QGroupBox("PX4 normalization constants");

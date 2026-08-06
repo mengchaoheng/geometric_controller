@@ -26,7 +26,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <px4_msgs/msg/allocation_value.hpp>
-#include <px4_msgs/msg/vehicle_acceleration_indi_feedback.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_attitude.hpp>
@@ -73,6 +72,66 @@ struct Quaternion
   double x{0.0};
   double y{0.0};
   double z{0.0};
+};
+
+class VectorButterworthLowPass2p
+{
+public:
+  void reset(const Eigen::Vector3d & value)
+  {
+    input_1_ = value;
+    input_2_ = value;
+    output_1_ = value;
+    output_2_ = value;
+    initialized_ = value.allFinite();
+  }
+
+  void clear()
+  {
+    initialized_ = false;
+  }
+
+  Eigen::Vector3d update(const Eigen::Vector3d & input, double dt, double cutoff_hz)
+  {
+    if (!input.allFinite() || !std::isfinite(dt) || dt <= 0.0) {
+      clear();
+      return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+    }
+    if (!initialized_) {
+      reset(input);
+      return input;
+    }
+    if (!std::isfinite(cutoff_hz) || cutoff_hz <= 0.0) {
+      reset(input);
+      return input;
+    }
+
+    const double sample_hz = 1.0 / dt;
+    const double limited_cutoff_hz = std::min(cutoff_hz, 0.45 * sample_hz);
+    const double k = std::tan(kPi * limited_cutoff_hz / sample_hz);
+    const double k_squared = k * k;
+    const double norm = 1.0 / (1.0 + std::sqrt(2.0) * k + k_squared);
+    const double b0 = k_squared * norm;
+    const double b1 = 2.0 * b0;
+    const double b2 = b0;
+    const double a1 = 2.0 * (k_squared - 1.0) * norm;
+    const double a2 = (1.0 - std::sqrt(2.0) * k + k_squared) * norm;
+    const Eigen::Vector3d output =
+      b0 * input + b1 * input_1_ + b2 * input_2_ -
+      a1 * output_1_ - a2 * output_2_;
+    input_2_ = input_1_;
+    input_1_ = input;
+    output_2_ = output_1_;
+    output_1_ = output;
+    return output;
+  }
+
+private:
+  Eigen::Vector3d input_1_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d input_2_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d output_1_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d output_2_{Eigen::Vector3d::Zero()};
+  bool initialized_{false};
 };
 
 bool startsWith(const std::string & value, const std::string & prefix)
@@ -365,6 +424,16 @@ private:
     declare_parameter<double>("inertia_z", 0.0043, describeDouble("Body yaw inertia [kg m^2].",
       0.00001, 10.0, 0.00001));
     declare_parameter<bool>("indi_acceleration_enabled", true);
+    declare_parameter<double>(
+      "indi_acceleration_cutoff_hz", 8.0,
+      describeDouble(
+        "Second-order low-pass cutoff for VehicleLocalPosition EKF acceleration [Hz].",
+        0.0, 50.0, 0.5));
+    declare_parameter<double>(
+      "indi_rate_feedback_cutoff_hz", 30.0,
+      describeDouble(
+        "Second-order low-pass cutoff for geometric INDI omega/alpha/torque feedback [Hz].",
+        0.0, 100.0, 0.5));
     declare_parameter<double>("Kp_x", 10.0, describeDouble("Position gain x.", 0.0, 40.0, 0.1));
     declare_parameter<double>("Kp_y", 10.0, describeDouble("Position gain y.", 0.0, 40.0, 0.1));
     declare_parameter<double>("Kp_z", 10.0, describeDouble("Position gain z.", 0.0, 40.0, 0.1));
@@ -383,35 +452,6 @@ private:
       100.0, 0.1));
     declare_parameter<double>("KOmega_y", 3.0, describeDouble("Yaw angular-rate gain.", 0.0,
       100.0, 0.1));
-    declare_parameter<double>("indi_Kp_x", 10.0,
-      describeDouble("Geometric INDI position gain x.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Kp_y", 10.0,
-      describeDouble("Geometric INDI position gain y.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Kp_z", 10.0,
-      describeDouble("Geometric INDI position gain z.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Kv_x", 6.0,
-      describeDouble("Geometric INDI velocity gain x.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Kv_y", 6.0,
-      describeDouble("Geometric INDI velocity gain y.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Kv_z", 6.0,
-      describeDouble("Geometric INDI velocity gain z.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Ktheta_r", 150.0,
-      describeDouble("Geometric INDI roll attitude gain.", 0.0, 500.0, 1.0));
-    declare_parameter<double>("indi_Ktheta_p", 150.0,
-      describeDouble("Geometric INDI pitch attitude gain.", 0.0, 500.0, 1.0));
-    declare_parameter<double>("indi_Ktheta_y", 3.0,
-      describeDouble("Geometric INDI yaw attitude gain.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Komega_r", 20.0,
-      describeDouble("Geometric INDI roll angular-rate gain.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Komega_p", 20.0,
-      describeDouble("Geometric INDI pitch angular-rate gain.", 0.0, 100.0, 0.1));
-    declare_parameter<double>("indi_Komega_y", 8.0,
-      describeDouble("Geometric INDI yaw angular-rate gain.", 0.0, 100.0, 0.1));
-    declare_parameter<double>(
-      "yaw_torque_cutoff_hz", 1.0,
-      describeDouble(
-        "Final yaw-torque low-pass cutoff for the external wrench path [Hz].",
-        0.0, 100.0, 0.1));
     declare_parameter<double>(
       "normalizedthrust_constant", 0.022058823529,
       describeDouble(
@@ -446,13 +486,11 @@ private:
       px4VersionedTopic<px4_msgs::msg::VehicleLocalPosition>(
         "/fmu/out/vehicle_local_position"));
     declare_parameter<std::string>(
-      "px4.acceleration_indi_feedback_topic", "/fmu/out/vehicle_acceleration_indi_feedback");
-    declare_parameter<std::string>(
-      "px4.allocation_value_topic", "/fmu/out/allocation_value");
-    declare_parameter<std::string>(
       "px4.vehicle_attitude_topic", "/fmu/out/vehicle_attitude");
     declare_parameter<std::string>(
       "px4.vehicle_angular_velocity_topic", "/fmu/out/vehicle_angular_velocity");
+    declare_parameter<std::string>(
+      "px4.allocation_value_topic", "/fmu/out/allocation_value");
     declare_parameter<int>("px4.target_system", 1);
     declare_parameter<int>("px4.target_component", 1);
     declare_parameter<int>("px4.source_system", 1);
@@ -617,22 +655,6 @@ private:
       get_parameter("KOmega_r").as_double(),
       get_parameter("KOmega_p").as_double(),
       get_parameter("KOmega_y").as_double());
-    controller_params_.indi_Kp = Eigen::Vector3d(
-      get_parameter("indi_Kp_x").as_double(),
-      get_parameter("indi_Kp_y").as_double(),
-      get_parameter("indi_Kp_z").as_double());
-    controller_params_.indi_Kv = Eigen::Vector3d(
-      get_parameter("indi_Kv_x").as_double(),
-      get_parameter("indi_Kv_y").as_double(),
-      get_parameter("indi_Kv_z").as_double());
-    controller_params_.indi_Ktheta = Eigen::Vector3d(
-      get_parameter("indi_Ktheta_r").as_double(),
-      get_parameter("indi_Ktheta_p").as_double(),
-      get_parameter("indi_Ktheta_y").as_double());
-    controller_params_.indi_Komega = Eigen::Vector3d(
-      get_parameter("indi_Komega_r").as_double(),
-      get_parameter("indi_Komega_p").as_double(),
-      get_parameter("indi_Komega_y").as_double());
     controller_params_.mass = get_parameter("mass").as_double();
     controller_params_.inertia = Eigen::Vector3d(
       get_parameter("inertia_x").as_double(),
@@ -640,8 +662,10 @@ private:
       get_parameter("inertia_z").as_double()).asDiagonal();
     controller_params_.indi_acceleration_enabled =
       get_parameter("indi_acceleration_enabled").as_bool();
+    indi_acceleration_cutoff_hz_ = get_parameter("indi_acceleration_cutoff_hz").as_double();
+    indi_rate_feedback_cutoff_hz_ =
+      get_parameter("indi_rate_feedback_cutoff_hz").as_double();
     controller_params_.outer_loop_rate_hz = outer_loop_rate_hz_;
-    yaw_torque_cutoff_hz_ = get_parameter("yaw_torque_cutoff_hz").as_double();
     normalizedthrust_constant_ = get_parameter("normalizedthrust_constant").as_double();
     normalizedthrust_offset_ = get_parameter("normalizedthrust_offset").as_double();
     normalizedtorque_constant_ = Eigen::Vector3d(
@@ -658,12 +682,10 @@ private:
     vehicle_command_topic_ = get_parameter("px4.vehicle_command_topic").as_string();
     vehicle_status_topic_ = get_parameter("px4.vehicle_status_topic").as_string();
     vehicle_local_position_topic_ = get_parameter("px4.vehicle_local_position_topic").as_string();
-    acceleration_indi_feedback_topic_ =
-      get_parameter("px4.acceleration_indi_feedback_topic").as_string();
-    allocation_value_topic_ = get_parameter("px4.allocation_value_topic").as_string();
     vehicle_attitude_topic_ = get_parameter("px4.vehicle_attitude_topic").as_string();
     vehicle_angular_velocity_topic_ =
       get_parameter("px4.vehicle_angular_velocity_topic").as_string();
+    allocation_value_topic_ = get_parameter("px4.allocation_value_topic").as_string();
     target_system_ = static_cast<uint8_t>(get_parameter("px4.target_system").as_int());
     target_component_ = static_cast<uint8_t>(get_parameter("px4.target_component").as_int());
     source_system_ = static_cast<uint8_t>(get_parameter("px4.source_system").as_int());
@@ -788,22 +810,6 @@ private:
         std::bind(&TrajectoryOffboardNode::vehicleLocalPositionCallback, this,
         std::placeholders::_1));
     }
-    if (!acceleration_indi_feedback_topic_.empty()) {
-      acceleration_indi_feedback_subscriber_ =
-        create_subscription<px4_msgs::msg::VehicleAccelerationIndiFeedback>(
-        acceleration_indi_feedback_topic_, px4_sub_qos,
-        std::bind(
-          &TrajectoryOffboardNode::accelerationIndiFeedbackCallback, this,
-          std::placeholders::_1));
-    }
-    if (!allocation_value_topic_.empty()) {
-      allocation_value_subscriber_ =
-        create_subscription<px4_msgs::msg::AllocationValue>(
-        allocation_value_topic_, px4_sub_qos,
-        std::bind(
-          &TrajectoryOffboardNode::allocationValueCallback, this,
-          std::placeholders::_1));
-    }
     if (!vehicle_attitude_topic_.empty()) {
       vehicle_attitude_subscriber_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
         vehicle_attitude_topic_, px4_sub_qos,
@@ -815,6 +821,13 @@ private:
         vehicle_angular_velocity_topic_, px4_sub_qos,
         std::bind(
           &TrajectoryOffboardNode::vehicleAngularVelocityCallback, this,
+          std::placeholders::_1));
+    }
+    if (!allocation_value_topic_.empty()) {
+      allocation_value_subscriber_ = create_subscription<px4_msgs::msg::AllocationValue>(
+        allocation_value_topic_, px4_sub_qos,
+        std::bind(
+          &TrajectoryOffboardNode::allocationValueCallback, this,
           std::placeholders::_1));
     }
     auto reference_path_qos = rclcpp::QoS(rclcpp::KeepLast(1));
@@ -841,6 +854,7 @@ private:
     active_controller_ = geometric_controller::makeController(active_controller_type_);
     last_controller_sample_timestamp_ = 0;
     next_controller_sample_timestamp_ = 0;
+    controller_allocation_feedback_valid_ = false;
     if (active_controller_ && controllerFeedbackValid()) {
       active_controller_->reset(controllerState());
     }
@@ -987,11 +1001,9 @@ private:
     const std::string previous_command_topic = vehicle_command_topic_;
     const std::string previous_status_topic = vehicle_status_topic_;
     const std::string previous_local_position_topic = vehicle_local_position_topic_;
-    const std::string previous_acceleration_feedback_topic =
-      acceleration_indi_feedback_topic_;
-    const std::string previous_allocation_value_topic = allocation_value_topic_;
     const std::string previous_attitude_topic = vehicle_attitude_topic_;
     const std::string previous_angular_velocity_topic = vehicle_angular_velocity_topic_;
+    const std::string previous_allocation_value_topic = allocation_value_topic_;
     const std::string previous_path_topic = visualization_path_topic_;
     const std::string previous_pose_topic = visualization_pose_topic_;
     const std::string previous_vehicle_pose_topic = visualization_vehicle_pose_topic_;
@@ -1010,6 +1022,7 @@ private:
         publishOffboardControlMode(now());
       }
     } else if (controller_reset_pending_ && active_controller_ && controllerFeedbackValid()) {
+      controller_allocation_feedback_valid_ = false;
       active_controller_->reset(controllerState());
       RCLCPP_INFO(
         get_logger(), "Reset %s state after controller parameter update.",
@@ -1039,10 +1052,9 @@ private:
       previous_command_topic != vehicle_command_topic_ ||
       previous_status_topic != vehicle_status_topic_ ||
       previous_local_position_topic != vehicle_local_position_topic_ ||
-      previous_acceleration_feedback_topic != acceleration_indi_feedback_topic_ ||
-      previous_allocation_value_topic != allocation_value_topic_ ||
       previous_attitude_topic != vehicle_attitude_topic_ ||
       previous_angular_velocity_topic != vehicle_angular_velocity_topic_ ||
+      previous_allocation_value_topic != allocation_value_topic_ ||
       previous_path_topic != visualization_path_topic_ ||
       previous_pose_topic != visualization_pose_topic_ ||
       previous_vehicle_pose_topic != visualization_vehicle_pose_topic_ ||
@@ -1097,6 +1109,7 @@ private:
     auto_start_ready_logged_ = false;
     auto_start_requested_ = false;
     controller_reference_received_ = false;
+    controller_allocation_feedback_valid_ = false;
     if (active_controller_ && controllerFeedbackValid()) {
       active_controller_->reset(controllerState());
     }
@@ -1113,8 +1126,16 @@ private:
     const auto setpoint = currentReference(stamp);
     publishVisualization(setpoint, stamp);
     if (geometric_controller::isRosController(active_controller_type_)) {
-      controller_reference_sample_ = setpoint;
-      controller_reference_received_ = true;
+      // Do not publish a start-target sample cached before EKF position became
+      // valid. The angular-rate callback can run between the first valid PX4
+      // state message and this timer; keep the ROS controller gated until its
+      // reference has been refreshed from a valid/hold/transition sample.
+      if (localPositionValid()) {
+        controller_reference_sample_ = setpoint;
+        controller_reference_received_ = true;
+      } else {
+        controller_reference_received_ = false;
+      }
     }
 
     if (!offboard_enabled_) {
@@ -1122,6 +1143,14 @@ private:
     }
 
     if (!shouldPublishSetpoint()) {
+      if (active_controller_type_ ==
+        geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
+      {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "INDI NOT ACTIVE: %s; no VehicleThrustSetpoint/VehicleTorqueSetpoint is published.",
+          indiFeedbackBlocker().c_str());
+      }
       if (trajectory_setpoint_gate_open_) {
         trajectory_setpoint_gate_open_ = false;
         RCLCPP_WARN(
@@ -1133,13 +1162,24 @@ private:
 
     if (!trajectory_setpoint_gate_open_) {
       trajectory_setpoint_gate_open_ = true;
-      RCLCPP_INFO(
-        get_logger(),
-        "Controller feedback is valid; publishing %s at %.1f Hz for Offboard.",
-        geometric_controller::isRosController(active_controller_type_) ?
-        "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint",
-        geometric_controller::isRosController(active_controller_type_) ?
-        inner_loop_rate_hz_ : setpoint_rate_hz_);
+      if (active_controller_type_ ==
+        geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
+      {
+        RCLCPP_INFO(
+          get_logger(),
+          "INDI ACTIVE: PX4 AllocationValue %s feedback is fresh; publishing "
+          "VehicleThrustSetpoint + VehicleTorqueSetpoint at %.1f Hz.",
+          controller_params_.indi_acceleration_enabled ? "force/torque" : "torque",
+          inner_loop_rate_hz_);
+      } else {
+        RCLCPP_INFO(
+          get_logger(),
+          "Controller feedback is valid; publishing %s at %.1f Hz for Offboard.",
+          geometric_controller::isRosController(active_controller_type_) ?
+          "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint",
+          geometric_controller::isRosController(active_controller_type_) ?
+          inner_loop_rate_hz_ : setpoint_rate_hz_);
+      }
     }
     if (!geometric_controller::isRosController(active_controller_type_)) {
       publishTrajectorySetpoint(setpoint, stamp);
@@ -1332,9 +1372,7 @@ private:
       if (active_controller_type_ ==
         geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
       {
-        return controller_params_.indi_acceleration_enabled ?
-               "waiting for PX4 INDI attitude/rate/acceleration/allocation feedback" :
-               "waiting for PX4 INDI attitude/rate/allocation feedback";
+        return "waiting for INDI: " + indiFeedbackBlocker();
       }
       return "waiting for valid PX4 attitude on '" + vehicle_attitude_topic_ +
              "' and angular velocity on '" + vehicle_angular_velocity_topic_ + "'";
@@ -1561,29 +1599,62 @@ private:
     if (active_controller_type_ ==
       geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI)
     {
-      if (!allocation_value_received_ ||
-        !std::all_of(
-          allocation_value_.allocated_torque.begin(),
-          allocation_value_.allocated_torque.end(),
-          [](float value) {return std::isfinite(value);}))
-      {
-        return false;
-      }
-      if (controller_params_.indi_acceleration_enabled) {
-        return accelerationIndiFeedbackValid();
-      }
+      return indiFeedbackBlocker().empty();
     }
     return true;
   }
 
+  std::string indiFeedbackBlocker() const
+  {
+    if (!localPositionValid()) {
+      return "VehicleLocalPosition is invalid";
+    }
+    if (!vehicle_attitude_received_) {
+      return "no VehicleAttitude";
+    }
+    const auto & q = vehicle_attitude_.q;
+    if (!std::isfinite(q[0]) || !std::isfinite(q[1]) ||
+      !std::isfinite(q[2]) || !std::isfinite(q[3]) ||
+      vehicle_attitude_.timestamp_sample == 0)
+    {
+      return "VehicleAttitude is invalid";
+    }
+    if (!vehicle_angular_velocity_received_) {
+      return "no VehicleAngularVelocity";
+    }
+    const auto & omega = vehicle_angular_velocity_.xyz;
+    if (!std::isfinite(omega[0]) || !std::isfinite(omega[1]) ||
+      !std::isfinite(omega[2]) || vehicle_angular_velocity_.timestamp_sample == 0)
+    {
+      return "VehicleAngularVelocity is invalid";
+    }
+    if (!allocation_value_received_) {
+      return "no AllocationValue";
+    }
+    if (!allocationTorqueFeedbackValid()) {
+      return "AllocationValue.allocated_torque is invalid or stale";
+    }
+    if (!filtered_indi_body_rate_.allFinite() ||
+      !filtered_indi_angular_acceleration_.allFinite() ||
+      !filtered_indi_allocated_torque_.allFinite())
+    {
+      return "geometric INDI rate feedback filter is not ready";
+    }
+    if (controller_params_.indi_acceleration_enabled) {
+      if (!allocationForceFeedbackValid()) {
+        return "AllocationValue.allocated_force is invalid or stale";
+      }
+      if (!accelerationIndiFeedbackValid()) {
+        return "VehicleLocalPosition acceleration is invalid";
+      }
+    }
+    return {};
+  }
+
   bool accelerationIndiFeedbackValid() const
   {
-    return acceleration_indi_feedback_received_ &&
-           acceleration_indi_feedback_.timestamp_sample > 0 &&
-           std::all_of(
-      acceleration_indi_feedback_.xyz.begin(),
-      acceleration_indi_feedback_.xyz.end(),
-      [](float value) {return std::isfinite(value);});
+    return acceleration_indi_feedback_valid_ &&
+           filtered_indi_acceleration_.allFinite();
   }
 
   geometric_controller::VehicleState controllerState() const
@@ -1597,13 +1668,9 @@ private:
       static_cast<double>(vehicle_local_position_.vx),
       static_cast<double>(vehicle_local_position_.vy),
       static_cast<double>(vehicle_local_position_.vz)});
-    // PX4 publishes the already filtered velocity derivative used by
-    // mc_pos_control. The controller reads the newest sample without a second
-    // ROS-side filter.
-    state.acceleration = Eigen::Vector3d(
-      static_cast<double>(acceleration_indi_feedback_.xyz[0]),
-      static_cast<double>(acceleration_indi_feedback_.xyz[1]),
-      static_cast<double>(acceleration_indi_feedback_.xyz[2]));
+    // This mirrors PX4's MPC_INDI_A_SRC=1 path: EKF acceleration from
+    // VehicleLocalPosition, passed through an independent second-order LPF.
+    state.acceleration = filtered_indi_acceleration_;
 
     state.attitude = Eigen::Vector4d(
       static_cast<double>(vehicle_attitude_.q[0]),
@@ -1611,14 +1678,20 @@ private:
       static_cast<double>(vehicle_attitude_.q[2]),
       static_cast<double>(vehicle_attitude_.q[3]));
     state.attitude.normalize();
-    const Eigen::Vector3d allocated_force_body(
-      allocation_value_.allocated_force[0],
-      allocation_value_.allocated_force[1],
-      allocation_value_.allocated_force[2]);
-    state.applied_thrust_axis_force =
-      -Eigen::Quaterniond(
+    // INDI uses PX4's latest allocator feedback in physical units. ROS
+    // neither reconstructs it nor applies an actuator model.
+    const auto & allocation = allocation_value_;
+    const Eigen::Vector3d allocation_force_body(
+      static_cast<double>(allocation.allocated_force[0]),
+      static_cast<double>(allocation.allocated_force[1]),
+      static_cast<double>(allocation.allocated_force[2]));
+    const Eigen::Matrix3d attitude_rotation = Eigen::Quaterniond(
       state.attitude[0], state.attitude[1], state.attitude[2], state.attitude[3])
-      .toRotationMatrix() * allocated_force_body;
+      .toRotationMatrix();
+    state.applied_thrust_axis_force.setConstant(std::numeric_limits<double>::quiet_NaN());
+    if (allocationForceFeedbackValid() && allocation_force_body.allFinite()) {
+      state.applied_thrust_axis_force = -attitude_rotation * allocation_force_body;
+    }
     const auto & angular_velocity = vehicle_angular_velocity_;
     const Eigen::Vector3d raw_body_rate(
       static_cast<double>(angular_velocity.xyz[0]),
@@ -1628,14 +1701,18 @@ private:
       static_cast<double>(angular_velocity.xyz_derivative[0]),
       static_cast<double>(angular_velocity.xyz_derivative[1]),
       static_cast<double>(angular_velocity.xyz_derivative[2]));
-    // PX4 already filters angular velocity/angular acceleration and models
-    // actuator torque in AllocationValue. Do not add a second ROS-side filter.
-    state.body_rate = raw_body_rate;
-    state.angular_acceleration = raw_angular_acceleration;
-    state.applied_torque = Eigen::Vector3d(
-      allocation_value_.allocated_torque[0],
-      allocation_value_.allocated_torque[1],
-      allocation_value_.allocated_torque[2]);
+    const bool use_indi_feedback =
+      active_controller_type_ == geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI;
+    state.body_rate = use_indi_feedback ? filtered_indi_body_rate_ : raw_body_rate;
+    state.angular_acceleration = use_indi_feedback ?
+      filtered_indi_angular_acceleration_ : raw_angular_acceleration;
+    const Eigen::Vector3d raw_allocated_torque(
+      static_cast<double>(allocation.allocated_torque[0]),
+      static_cast<double>(allocation.allocated_torque[1]),
+      static_cast<double>(allocation.allocated_torque[2]));
+    state.applied_torque = allocationTorqueFeedbackValid() ?
+      (use_indi_feedback ? filtered_indi_allocated_torque_ : raw_allocated_torque) :
+      Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
     state.yaw = std::atan2(
       2.0 * (state.attitude[0] * state.attitude[3] +
       state.attitude[1] * state.attitude[2]),
@@ -1649,6 +1726,21 @@ private:
     uint64_t feedback_timestamp_sample, double dt)
   {
     if (!active_controller_) {
+      return;
+    }
+
+    const bool torque_feedback_valid = allocationTorqueFeedbackValid();
+    const bool force_feedback_required = controller_params_.indi_acceleration_enabled;
+    const bool force_feedback_valid = allocationForceFeedbackValid();
+    controller_allocation_feedback_valid_ = torque_feedback_valid &&
+      (!force_feedback_required || force_feedback_valid);
+    if (active_controller_type_ == geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI &&
+      !controller_allocation_feedback_valid_)
+    {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "INDI waiting for valid %s feedback; output withheld.",
+        !torque_feedback_valid ? "allocated_torque" : "allocated_force");
       return;
     }
 
@@ -1688,27 +1780,23 @@ private:
         command.torque.y(), command.torque.z());
     }
 
-    const double unfiltered_yaw_torque = command.torque.z();
-    const double filtered_yaw_torque =
-      updateYawTorqueFilter(unfiltered_yaw_torque, dt);
-    if (command.indi_torque_feedback_valid) {
-      const double normalized_unfiltered_yaw =
-        normalizedtorque_constant_.z() * unfiltered_yaw_torque;
-      command.indi_torque_feedback.z() =
-        std::abs(normalized_unfiltered_yaw) > std::numeric_limits<float>::epsilon() ?
-        command.indi_torque_feedback.z() *
-        filtered_yaw_torque / unfiltered_yaw_torque : 0.0;
-    }
-    command.torque.z() = filtered_yaw_torque;
     const auto normalized = geometric_controller::normalizeWrench(
       command, controller_params_.mass, normalizedthrust_constant_,
       normalizedthrust_offset_, normalizedtorque_constant_);
     if (normalized.saturated) {
+      const Eigen::Vector3d requested_normalized_torque =
+        normalizedtorque_constant_.asDiagonal() * command.torque;
+      const double requested_normalized_thrust =
+        normalizedthrust_constant_ * command.collective_thrust / controller_params_.mass +
+        normalizedthrust_offset_;
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "%s wrench saturated by PX4 normalized limits: T=%.3f N tau=[%.3f %.3f %.3f] N*m.",
+        "%s wrench saturated by normalized limits: T=%.3f N (norm %.3f) "
+        "tau=[%.3f %.3f %.3f] N*m (norm=[%.3f %.3f %.3f]).",
         active_controller_->name().c_str(), command.collective_thrust,
-        command.torque.x(), command.torque.y(), command.torque.z());
+        requested_normalized_thrust, command.torque.x(), command.torque.y(),
+        command.torque.z(), requested_normalized_torque.x(),
+        requested_normalized_torque.y(), requested_normalized_torque.z());
     }
 
     const uint64_t timestamp = timestampMicros(stamp);
@@ -1734,17 +1822,40 @@ private:
     vehicle_torque_setpoint_publisher_->publish(torque_message);
   }
 
-  double updateYawTorqueFilter(double input, double dt)
+  bool allocationTorqueFeedbackValid() const
   {
-    if (!yaw_torque_filter_initialized_ || yaw_torque_cutoff_hz_ <= 0.0) {
-      yaw_torque_filter_state_ = input;
-      yaw_torque_filter_initialized_ = true;
-      return input;
+    if (!allocation_value_received_ || allocation_value_.timestamp == 0) {
+      return false;
     }
-    const double time_constant = 1.0 / (2.0 * kPi * yaw_torque_cutoff_hz_);
-    const double alpha = dt / (time_constant + dt);
-    yaw_torque_filter_state_ += alpha * (input - yaw_torque_filter_state_);
-    return yaw_torque_filter_state_;
+    const Eigen::Vector3d torque(
+      static_cast<double>(allocation_value_.allocated_torque[0]),
+      static_cast<double>(allocation_value_.allocated_torque[1]),
+      static_cast<double>(allocation_value_.allocated_torque[2]));
+    if (!torque.allFinite()) {
+      return false;
+    }
+    const uint64_t reference_timestamp = vehicle_angular_velocity_.timestamp_sample;
+    constexpr uint64_t kAllocationSampleMaxAgeUs = 100000;
+    return reference_timestamp == 0 || reference_timestamp <= allocation_value_.timestamp ||
+           reference_timestamp - allocation_value_.timestamp < kAllocationSampleMaxAgeUs;
+  }
+
+  bool allocationForceFeedbackValid() const
+  {
+    if (!allocation_value_received_ || allocation_value_.timestamp == 0) {
+      return false;
+    }
+    const Eigen::Vector3d force(
+      static_cast<double>(allocation_value_.allocated_force[0]),
+      static_cast<double>(allocation_value_.allocated_force[1]),
+      static_cast<double>(allocation_value_.allocated_force[2]));
+    if (!force.allFinite()) {
+      return false;
+    }
+    const uint64_t reference_timestamp = vehicle_local_position_.timestamp_sample;
+    constexpr uint64_t kAllocationSampleMaxAgeUs = 100000;
+    return reference_timestamp == 0 || reference_timestamp <= allocation_value_.timestamp ||
+           reference_timestamp - allocation_value_.timestamp < kAllocationSampleMaxAgeUs;
   }
 
   void publishTrajectorySetpoint(
@@ -1795,10 +1906,18 @@ private:
     path.header.frame_id = visualization_frame_id_;
 
     const double duration = std::max(0.1, reference_trajectory_.previewDuration());
+    // `omega_value` can be changed in flight without resetting the reference
+    // phase.  Sampling from t=0 after that change uses the pre-transition
+    // trajectory and can cover only a fraction of the new period.  Preview
+    // from the current trajectory time instead, so a closed trajectory is
+    // complete for every steady omega.
+    const double preview_start_s =
+      (!offboard_enabled_ || !takeoff_before_trajectory_ || trajectory_started_) ?
+      std::max(0.0, (stamp - start_time_).seconds()) : 0.0;
     path.poses.reserve(static_cast<size_t>(preview_points_));
     for (int i = 0; i < preview_points_; ++i) {
       const double alpha = static_cast<double>(i) / static_cast<double>(preview_points_ - 1);
-      const auto sample = reference_trajectory_.sample(alpha * duration);
+      const auto sample = reference_trajectory_.sample(preview_start_s + alpha * duration);
       path.poses.push_back(toPoseStamped(sample, stamp));
     }
     reference_path_publisher_->publish(path);
@@ -1978,15 +2097,30 @@ private:
 
   void vehicleLocalPositionCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
   {
+    const Eigen::Vector3d acceleration_raw(
+      static_cast<double>(msg->ax), static_cast<double>(msg->ay),
+      static_cast<double>(msg->az));
+    double dt = 1.0 / std::max(outer_loop_rate_hz_, 1.0);
+    if (last_acceleration_sample_timestamp_ > 0 &&
+      msg->timestamp_sample > last_acceleration_sample_timestamp_)
+    {
+      dt = static_cast<double>(
+        msg->timestamp_sample - last_acceleration_sample_timestamp_) * 1.0e-6;
+    }
+    const bool timestamp_valid = msg->timestamp_sample > 0 &&
+      (last_acceleration_sample_timestamp_ == 0 ||
+      msg->timestamp_sample > last_acceleration_sample_timestamp_);
+    if (timestamp_valid && acceleration_raw.allFinite()) {
+      filtered_indi_acceleration_ = acceleration_indi_filter_.update(
+        acceleration_raw, dt, indi_acceleration_cutoff_hz_);
+      acceleration_indi_feedback_valid_ = filtered_indi_acceleration_.allFinite();
+      last_acceleration_sample_timestamp_ = msg->timestamp_sample;
+    } else if (!acceleration_raw.allFinite()) {
+      acceleration_indi_filter_.clear();
+      acceleration_indi_feedback_valid_ = false;
+    }
     vehicle_local_position_ = *msg;
     local_position_received_ = true;
-  }
-
-  void accelerationIndiFeedbackCallback(
-    const px4_msgs::msg::VehicleAccelerationIndiFeedback::SharedPtr msg)
-  {
-    acceleration_indi_feedback_ = *msg;
-    acceleration_indi_feedback_received_ = true;
   }
 
   void vehicleAttitudeCallback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
@@ -1995,9 +2129,50 @@ private:
     vehicle_attitude_received_ = true;
   }
 
-  void allocationValueCallback(
-    const px4_msgs::msg::AllocationValue::SharedPtr msg)
+  void updateIndiAngularFeedback(
+    const Eigen::Vector3d & body_rate, const Eigen::Vector3d & angular_acceleration,
+    uint64_t timestamp_sample)
   {
+    double dt = 1.0 / std::max(inner_loop_rate_hz_, 1.0);
+    if (last_indi_angular_feedback_timestamp_ > 0 &&
+      timestamp_sample > last_indi_angular_feedback_timestamp_)
+    {
+      dt = static_cast<double>(
+        timestamp_sample - last_indi_angular_feedback_timestamp_) * 1.0e-6;
+    }
+    if (timestamp_sample > last_indi_angular_feedback_timestamp_) {
+      filtered_indi_body_rate_ = indi_body_rate_filter_.update(
+        body_rate, dt, indi_rate_feedback_cutoff_hz_);
+      filtered_indi_angular_acceleration_ = indi_angular_acceleration_filter_.update(
+        angular_acceleration, dt, indi_rate_feedback_cutoff_hz_);
+      last_indi_angular_feedback_timestamp_ = timestamp_sample;
+    }
+  }
+
+  void updateIndiAllocatedTorqueFeedback(
+    const Eigen::Vector3d & torque, uint64_t timestamp_sample)
+  {
+    double dt = 1.0 / std::max(inner_loop_rate_hz_, 1.0);
+    if (last_indi_torque_feedback_timestamp_ > 0 &&
+      timestamp_sample > last_indi_torque_feedback_timestamp_)
+    {
+      dt = static_cast<double>(
+        timestamp_sample - last_indi_torque_feedback_timestamp_) * 1.0e-6;
+    }
+    if (timestamp_sample > last_indi_torque_feedback_timestamp_) {
+      filtered_indi_allocated_torque_ = indi_allocated_torque_filter_.update(
+        torque, dt, indi_rate_feedback_cutoff_hz_);
+      last_indi_torque_feedback_timestamp_ = timestamp_sample;
+    }
+  }
+
+  void allocationValueCallback(const px4_msgs::msg::AllocationValue::SharedPtr msg)
+  {
+    const Eigen::Vector3d torque(
+      static_cast<double>(msg->allocated_torque[0]),
+      static_cast<double>(msg->allocated_torque[1]),
+      static_cast<double>(msg->allocated_torque[2]));
+    updateIndiAllocatedTorqueFeedback(torque, msg->timestamp_sample);
     allocation_value_ = *msg;
     allocation_value_received_ = true;
   }
@@ -2005,6 +2180,14 @@ private:
   void vehicleAngularVelocityCallback(
     const px4_msgs::msg::VehicleAngularVelocity::SharedPtr msg)
   {
+    const Eigen::Vector3d body_rate(
+      static_cast<double>(msg->xyz[0]), static_cast<double>(msg->xyz[1]),
+      static_cast<double>(msg->xyz[2]));
+    const Eigen::Vector3d angular_acceleration(
+      static_cast<double>(msg->xyz_derivative[0]),
+      static_cast<double>(msg->xyz_derivative[1]),
+      static_cast<double>(msg->xyz_derivative[2]));
+    updateIndiAngularFeedback(body_rate, angular_acceleration, msg->timestamp_sample);
     vehicle_angular_velocity_ = *msg;
     vehicle_angular_velocity_received_ = true;
 
@@ -2071,8 +2254,8 @@ private:
   std::string setpoint_level_{"position"};
   double normalizedthrust_constant_{0.022058823529};
   double normalizedthrust_offset_{0.0};
-  double yaw_torque_cutoff_hz_{1.0};
-  double yaw_torque_filter_state_{0.0};
+  double indi_acceleration_cutoff_hz_{8.0};
+  double indi_rate_feedback_cutoff_hz_{30.0};
   Eigen::Vector3d normalizedtorque_constant_{
     Eigen::Vector3d(0.319957823650, 0.319957823650, 1.962568474088)};
 
@@ -2083,10 +2266,9 @@ private:
   std::string vehicle_command_topic_;
   std::string vehicle_status_topic_;
   std::string vehicle_local_position_topic_;
-  std::string acceleration_indi_feedback_topic_;
-  std::string allocation_value_topic_;
   std::string vehicle_attitude_topic_;
   std::string vehicle_angular_velocity_topic_;
+  std::string allocation_value_topic_;
   std::string visualization_path_topic_;
   std::string visualization_pose_topic_;
   std::string visualization_vehicle_pose_topic_;
@@ -2120,28 +2302,26 @@ private:
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
     vehicle_local_position_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleAccelerationIndiFeedback>::SharedPtr
-    acceleration_indi_feedback_subscriber_;
-  rclcpp::Subscription<px4_msgs::msg::AllocationValue>::SharedPtr
-    allocation_value_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr
     vehicle_attitude_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAngularVelocity>::SharedPtr
     vehicle_angular_velocity_subscriber_;
+  rclcpp::Subscription<px4_msgs::msg::AllocationValue>::SharedPtr
+    allocation_value_subscriber_;
   px4_msgs::msg::VehicleStatus vehicle_status_{};
   px4_msgs::msg::VehicleLocalPosition vehicle_local_position_{};
-  px4_msgs::msg::VehicleAccelerationIndiFeedback acceleration_indi_feedback_{};
-  px4_msgs::msg::AllocationValue allocation_value_{};
   px4_msgs::msg::VehicleAttitude vehicle_attitude_{};
   px4_msgs::msg::VehicleAngularVelocity vehicle_angular_velocity_{};
+  px4_msgs::msg::AllocationValue allocation_value_{};
   geometric_controller::TrajectorySample controller_reference_sample_{};
   std::vector<geometry_msgs::msg::PoseStamped> vehicle_path_;
   bool status_received_{false};
   bool local_position_received_{false};
-  bool acceleration_indi_feedback_received_{false};
-  bool allocation_value_received_{false};
+  bool acceleration_indi_feedback_valid_{false};
   bool vehicle_attitude_received_{false};
   bool vehicle_angular_velocity_received_{false};
+  bool allocation_value_received_{false};
+  bool controller_allocation_feedback_valid_{false};
   bool controller_reference_received_{false};
   bool parameters_pending_{false};
   bool trajectory_reset_pending_{false};
@@ -2155,7 +2335,21 @@ private:
   bool auto_start_requested_{false};
   bool prefer_trajectory_type_{false};
   bool syncing_selector_parameters_{false};
-  bool yaw_torque_filter_initialized_{false};
+  VectorButterworthLowPass2p acceleration_indi_filter_{};
+  VectorButterworthLowPass2p indi_body_rate_filter_{};
+  VectorButterworthLowPass2p indi_angular_acceleration_filter_{};
+  VectorButterworthLowPass2p indi_allocated_torque_filter_{};
+  Eigen::Vector3d filtered_indi_acceleration_{
+    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN())};
+  Eigen::Vector3d filtered_indi_body_rate_{
+    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN())};
+  Eigen::Vector3d filtered_indi_angular_acceleration_{
+    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN())};
+  Eigen::Vector3d filtered_indi_allocated_torque_{
+    Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN())};
+  uint64_t last_acceleration_sample_timestamp_{0};
+  uint64_t last_indi_angular_feedback_timestamp_{0};
+  uint64_t last_indi_torque_feedback_timestamp_{0};
   uint64_t last_controller_sample_timestamp_{0};
   uint64_t next_controller_sample_timestamp_{0};
   double last_auto_start_command_time_s_{-std::numeric_limits<double>::infinity()};

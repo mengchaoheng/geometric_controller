@@ -28,8 +28,9 @@ trajectory_offboard_node:
       velocity_feedforward: true
       acceleration_feedforward: true
 
-    # 6 keeps the PX4 position-controller path. Types 0-5 publish a ROS wrench.
-    controller_type: 6
+    # 1 is the ordinary ROS geometric wrench controller. Type 5 is the
+    # main.m-style INDI controller used after this baseline is stable.
+    controller_type: 1
     ctrl_mode: 1
     gravity: 9.81
     mass: 0.75
@@ -38,39 +39,29 @@ trajectory_offboard_node:
     inertia_z: 0.0043
     # Complete Geometric INDI: main.tex Eq. (55), (60), and (61).
     indi_acceleration_enabled: true
+    # Mirrors PX4 MPC_INDI_A_SRC=1: 2-pole LPF on EKF ax/ay/az.
+    indi_acceleration_cutoff_hz: 8.0
+    # main.m geometric-INDI inner feedback LPF for omega_0, dot(omega)_0,
+    # and allocated torque tau_0. Applied in ROS only for controller type 5.
+    indi_rate_feedback_cutoff_hz: 5.0
     drag_dx: 0.0
     drag_dy: 0.0
     drag_dz: 0.0
-    Kp_x: 30.0
-    Kp_y: 30.0
-    Kp_z: 20.0
-    Kv_x: 10.0
-    Kv_y: 10.0
-    Kv_z: 10.0
-    KR_r: 150.0
-    KR_p: 150.0
-    KR_y: 80.0
-    KOmega_r: 50.0
-    KOmega_p: 50.0
-    KOmega_y: 3.0
-    # main.m Geometric INDI gains, independent of the other controllers.
-    indi_Kp_x: 10.0
-    indi_Kp_y: 10.0
-    indi_Kp_z: 10.0
-    indi_Kv_x: 6.0
-    indi_Kv_y: 6.0
-    indi_Kv_z: 6.0
-    indi_Ktheta_r: 150.0
-    indi_Ktheta_p: 150.0
-    indi_Ktheta_y: 3.0
-    indi_Komega_r: 20.0
-    indi_Komega_p: 20.0
-    indi_Komega_y: 8.0
-    # Common yaw-torque output filter for the direct external-wrench path.
-    yaw_torque_cutoff_hz: 1.0
+    Kp_x: 10.0
+    Kp_y: 10.0
+    Kp_z: 10.0
+    Kv_x: 6.0
+    Kv_y: 6.0
+    Kv_z: 6.0
+    KR_r: 100.0
+    KR_p: 100.0
+    KR_y: 50.0
+    KOmega_r: 10.0
+    KOmega_p: 10.0
+    KOmega_y: 10.0
     # Same convention as mavros_controllers:
     # normalizedthrust_constant = mass / total_max_thrust.
-    normalizedthrust_constant: 0.020
+    normalizedthrust_constant: 0.022058823529
     normalizedthrust_offset: 0.0
     normalizedtorque_constant_r: 0.319957823650
     normalizedtorque_constant_p: 0.319957823650
@@ -82,10 +73,9 @@ trajectory_offboard_node:
       vehicle_thrust_setpoint_topic: /fmu/in/vehicle_thrust_setpoint
       vehicle_torque_setpoint_topic: /fmu/in/vehicle_torque_setpoint
       vehicle_command_topic: /fmu/in/vehicle_command
-      acceleration_indi_feedback_topic: /fmu/out/vehicle_acceleration_indi_feedback
-      allocation_value_topic: /fmu/out/allocation_value
       vehicle_attitude_topic: /fmu/out/vehicle_attitude
       vehicle_angular_velocity_topic: /fmu/out/vehicle_angular_velocity
+      allocation_value_topic: /fmu/out/allocation_value
       target_system: 1
       target_component: 1
       source_system: 1
@@ -105,9 +95,9 @@ trajectory_offboard_node:
 
     trajName: figure8_horizontal
     trajectory_type: 1
-    omega_value: 0.5
+    omega_value: 0.15
     path_preview_cycles: 10.0
-    trajectory_yaw_lock: false
+    trajectory_yaw_lock: true
     trajectory_yaw_fixed: 0.0
     origin_x: 0.0
     origin_y: 0.0

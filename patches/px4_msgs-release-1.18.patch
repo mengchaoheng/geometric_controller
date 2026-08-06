@@ -1,14 +1,3 @@
-diff --git a/msg/VehicleAccelerationIndiFeedback.msg b/msg/VehicleAccelerationIndiFeedback.msg
-new file mode 100644
---- /dev/null
-+++ b/msg/VehicleAccelerationIndiFeedback.msg
-@@ -0,0 +1,6 @@
-+uint32 MESSAGE_VERSION = 0
-+
-+uint64 timestamp
-+uint64 timestamp_sample # vehicle_local_position sample used by the velocity-derivative filters
-+
-+float32[3] xyz # filtered NED velocity derivative used by mc_pos_control acceleration INDI [m/s^2]
 diff --git a/msg/AllocationValue.msg b/msg/AllocationValue.msg
 new file mode 100644
 --- /dev/null

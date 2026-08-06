@@ -43,6 +43,14 @@ double positiveOr(double value, double fallback)
   return value;
 }
 
+double nonnegativeOr(double value, double fallback)
+{
+  if (!std::isfinite(value) || value < 0.0) {
+    return fallback;
+  }
+  return value;
+}
+
 double wrapPi(double value)
 {
   while (value > kPi) {
@@ -81,7 +89,7 @@ void ReferenceTrajectory::setParametersWithOmegaTransition(
   omega_transition_duration_s_ = std::max(duration_s, 1e-3);
   omega_transition_start_theta_ = current.theta;
   omega_transition_start_value_ = current.theta_dot;
-  omega_transition_target_value_ = positiveOr(parameters_.omega_value, 1.0);
+  omega_transition_target_value_ = nonnegativeOr(parameters_.omega_value, 1.0);
 }
 
 const TrajectoryParameters & ReferenceTrajectory::parameters() const
@@ -119,8 +127,8 @@ double ReferenceTrajectory::theta(double time_s) const
 
 double ReferenceTrajectory::nominalPeriod() const
 {
-  const double omega = positiveOr(parameters_.omega_value, 1.0);
-  return 2.0 * kPi / omega;
+  const double omega = nonnegativeOr(parameters_.omega_value, 1.0);
+  return omega > 0.0 ? 2.0 * kPi / omega : 0.0;
 }
 
 double ReferenceTrajectory::previewDuration() const
@@ -136,7 +144,7 @@ double ReferenceTrajectory::previewDuration() const
 ReferenceTrajectory::ThetaState ReferenceTrajectory::thetaState(double time_s) const
 {
   const double t = std::max(0.0, time_s);
-  const double omega_value = positiveOr(parameters_.omega_value, 1.0);
+  const double omega_value = nonnegativeOr(parameters_.omega_value, 1.0);
 
   ThetaState out;
   if (omega_transition_configured_) {

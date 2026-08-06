@@ -33,6 +33,15 @@ public:
   ControllerCommand update(
     const VehicleState & state, const FlatReference & reference,
     const ControllerParams & params, double dt) override;
+
+  void reset(const VehicleState & state) override;
+
+private:
+  // Sun Eq. (18)--(24) uses the collective thrust that is already acting on
+  // the vehicle.  The direct-wrench transport has no rotor-thrust feedback
+  // for this non-INDI controller, so retain the preceding commanded value.
+  bool thrust_feedback_valid_{false};
+  double previous_collective_thrust_{0.0};
 };
 
 }  // namespace geometric_controller
