@@ -47,9 +47,9 @@ trajectory_offboard_node:
     drag_dx: 0.0
     drag_dy: 0.0
     drag_dz: 0.0
-    Kp_x: 10.0
-    Kp_y: 10.0
-    Kp_z: 10.0
+    Kp_x: 20.0
+    Kp_y: 20.0
+    Kp_z: 20.0
     Kv_x: 6.0
     Kv_y: 6.0
     Kv_z: 6.0
