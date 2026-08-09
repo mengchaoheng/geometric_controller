@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "geometric_controller/controllers/legacy_geometric_controller.hpp"
 #include "geometric_controller/controllers/main_controller_math.hpp"
 #include "geometric_controller/controllers/main_geometric_controller.hpp"
 #include "geometric_controller/controllers/main_geometric_indi_controller.hpp"
@@ -143,15 +142,12 @@ DesiredAttitudeKinematics closedLoopDesiredAttitudeKinematics(
 }
 
 ControllerCommand commandFromWrench(
-  const FlatReference & reference, const Eigen::Vector3d & acceleration,
   const DesiredAttitudeKinematics & desired, double thrust,
   const Eigen::Vector3d & torque)
 {
   ControllerCommand command;
   command.torque = torque;
   command.attitude = desired.quaternion;
-  command.reference_position = reference.position;
-  command.desired_acceleration = acceleration;
   command.desired_body_rate = desired.body_rate;
   command.desired_angular_acceleration = desired.angular_acceleration;
   command.collective_thrust = thrust;
@@ -230,65 +226,6 @@ Eigen::Vector3d sunAngularAcceleration(
 
 }  // namespace
 
-ControllerCommand LegacyGeometricController::update(
-  const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double /* dt */)
-{
-  const Eigen::Matrix3d rotation = quat2RotMatrix(state.attitude);
-  const Eigen::Vector3d feedback =
-    params.Kp.asDiagonal() * (reference.position - state.position) +
-    params.Kv.asDiagonal() * (reference.velocity - state.velocity);
-  const Eigen::Vector3d acceleration =
-    reference.acceleration + feedback;
-  const Eigen::Vector3d body_z_acceleration = params.gravity - acceleration;
-  const double specific_thrust = body_z_acceleration.norm();
-  const Eigen::Vector3d b3 = rotation.col(2);
-  const Eigen::Vector3d b3_dot =
-    rotation * main_math::hat(state.body_rate) * Eigen::Vector3d::UnitZ();
-  const Eigen::Vector3d actual_acceleration =
-    params.gravity - specific_thrust * b3;
-  const Eigen::Vector3d body_z_acceleration_dot =
-    params.Kp.asDiagonal() * (state.velocity - reference.velocity) +
-    params.Kv.asDiagonal() * (actual_acceleration - reference.acceleration) -
-    reference.jerk;
-  const double thrust_dot = specific_thrust > kEpsilon ?
-    body_z_acceleration.normalized().dot(body_z_acceleration_dot) : 0.0;
-  const Eigen::Vector3d actual_acceleration_dot =
-    -thrust_dot * b3 - specific_thrust * b3_dot;
-  const Eigen::Vector3d body_z_acceleration_ddot =
-    params.Kp.asDiagonal() * (actual_acceleration - reference.acceleration) +
-    params.Kv.asDiagonal() * (actual_acceleration_dot - reference.jerk) -
-    reference.snap;
-  auto desired = desiredAttitudeKinematics(
-    body_z_acceleration, body_z_acceleration_dot,
-    body_z_acceleration_ddot, reference, rotation);
-
-  const Eigen::Matrix3d relative = rotation.transpose() * desired.rotation;
-  Eigen::Vector3d attitude_error;
-  if (params.ctrl_mode == kErrorGeometric) {
-    attitude_error = main_math::logSO3(relative);
-  } else {
-    attitude_error =
-      main_math::quaternionAttitudeError(state.attitude, desired.quaternion);
-  }
-  const Eigen::Vector3d desired_rate_in_body =
-    relative * desired.body_rate;
-  const Eigen::Vector3d desired_acceleration_in_body =
-    relative * desired.angular_acceleration -
-    main_math::hat(state.body_rate) * desired_rate_in_body;
-  const Eigen::Vector3d angular_acceleration =
-    params.KR.asDiagonal() * attitude_error +
-    params.KOmega.asDiagonal() * (desired_rate_in_body - state.body_rate) +
-    desired_acceleration_in_body;
-  const Eigen::Vector3d torque =
-    rigidBodyTorque(state, params, angular_acceleration);
-  auto command = commandFromWrench(
-    reference, acceleration, desired, params.mass * specific_thrust, torque);
-  command.desired_body_rate = desired_rate_in_body;
-  command.desired_angular_acceleration = desired_acceleration_in_body;
-  return command;
-}
-
 ControllerCommand MainGeometricController::update(
   const VehicleState & state, const FlatReference & reference,
   const ControllerParams & params, double /* dt */)
@@ -304,8 +241,7 @@ ControllerCommand MainGeometricController::update(
     angularAccelerationCommand(state, params, desired);
   const Eigen::Vector3d torque =
     rigidBodyTorque(state, params, angular_acceleration);
-  auto command = commandFromWrench(
-    reference, acceleration, desired, params.mass * specific_thrust, torque);
+  auto command = commandFromWrench(desired, params.mass * specific_thrust, torque);
   command.desired_body_rate =
     rotation.transpose() * desired.rotation * desired.body_rate;
   command.desired_angular_acceleration = angular_acceleration;
@@ -358,7 +294,7 @@ ControllerCommand MainLeeController::update(
     params.inertia * (
     main_math::hat(state.body_rate) * desired_rate_in_body -
     rotation.transpose() * desired.rotation * desired.angular_acceleration);
-  return commandFromWrench(reference, actual_acceleration, desired, thrust, torque);
+  return commandFromWrench(desired, thrust, torque);
 }
 
 void MainJohnsonController::reset(const VehicleState & /* state */)
@@ -424,8 +360,7 @@ ControllerCommand MainJohnsonController::update(
     jacobian.transpose() * params.inertia *
     params.KR.asDiagonal() * attitude_error +
     params.inertia * params.KOmega.asDiagonal() * rate_error;
-  auto command = commandFromWrench(
-    reference, actual_acceleration, desired, thrust, torque);
+  auto command = commandFromWrench(desired, thrust, torque);
   command.desired_body_rate = desired_rate_in_body;
   command.desired_angular_acceleration = acceleration_in_body;
   return command;
@@ -459,8 +394,7 @@ ControllerCommand MainSunDFBCController::update(
   previous_collective_thrust_ = thrust;
   thrust_feedback_valid_ = true;
 
-  return commandFromWrench(
-    reference, acceleration, desired, thrust, torque);
+  return commandFromWrench(desired, thrust, torque);
 }
 
 void MainGeometricINDIController::reset(const VehicleState & state)
@@ -468,61 +402,82 @@ void MainGeometricINDIController::reset(const VehicleState & state)
   (void)state;
   commanded_body_z_force_.setZero();
   force_command_valid_ = false;
-  outer_loop_elapsed_s_ = 0.0;
+  last_acceleration_sample_timestamp_ = 0;
 }
 
 ControllerCommand MainGeometricINDIController::update(
   const VehicleState & state, const FlatReference & reference,
-  const ControllerParams & params, double dt)
+  const ControllerParams & params, double /* dt */)
 {
-  const Eigen::Matrix3d rotation = quat2RotMatrix(state.attitude);
   const Eigen::Vector3d acceleration_command =
     accelerationCommand(state, reference, params);
   const Eigen::Vector3d direct_body_z_force =
     params.mass * (params.gravity - acceleration_command);
 
-  // main.tex Eq. (55) runs at the configured outer-loop frequency. The
-  // angular-rate-driven inner loop holds the most recent thrust-vector command.
-  const double outer_period_s = 1.0 / params.outer_loop_rate_hz;
-  outer_loop_elapsed_s_ += dt;
-  const bool run_outer_loop =
-    !force_command_valid_ || outer_loop_elapsed_s_ + 1e-12 >= outer_period_s;
-  if (run_outer_loop) {
-    commanded_body_z_force_ = params.indi_acceleration_enabled ?
-      state.applied_thrust_axis_force -
-      params.mass * (acceleration_command - state.acceleration) :
-      direct_body_z_force;
+  const bool use_acceleration_indi = params.indi_acceleration_enabled;
+  if (use_acceleration_indi) {
+    // main.tex Eq. (55), using the PX4 MPC_INDI_A_SRC=1 acceleration and
+    // MPC_INDI_F_SRC=0 physical allocation feedback supplied in VehicleState.
+    // PX4 mc_pos_control is scheduled by VehicleLocalPosition. Mirror that
+    // sampling exactly: update the incremental force once for each new a_0/F_0
+    // pair, then hold it while rate INDI continues on angular-velocity samples.
+    const bool new_acceleration_sample = state.acceleration_sample_timestamp != 0 &&
+      state.acceleration_sample_timestamp != last_acceleration_sample_timestamp_;
+    if (!force_command_valid_ || new_acceleration_sample) {
+      commanded_body_z_force_ = state.applied_thrust_axis_force -
+        params.mass * (acceleration_command - state.acceleration);
+      force_command_valid_ = true;
+      last_acceleration_sample_timestamp_ = state.acceleration_sample_timestamp;
+    }
+  } else {
+    // Bypass Eq. (55) with direct force inversion. The attitude/rate reference
+    // remains geometric_indi's Sun path rather than main_geometric's separate
+    // closed-loop derivative construction.
+    commanded_body_z_force_ = direct_body_z_force;
     force_command_valid_ = true;
-    outer_loop_elapsed_s_ = std::fmod(outer_loop_elapsed_s_, outer_period_s);
+    last_acceleration_sample_timestamp_ = 0;
   }
 
   const double thrust = commanded_body_z_force_.norm();
-  const Eigen::Vector3d body_z_force_for_attitude =
-    params.indi_acceleration_enabled ?
-    commanded_body_z_force_ : direct_body_z_force;
-  // main.m uses the previous allocated thrust magnitude T_0 in the
-  // flatness-rate map, while the attitude itself follows the command T*b3.
-  const double thrust_for_rates = params.indi_acceleration_enabled ?
+  // Keep geometric_indi on its own Sun reference path for every diagnostic
+  // switch combination. Disabling an INDI loop bypasses only its incremental
+  // law; it never delegates to MainGeometricController.
+  // main.m uses the achieved allocated thrust magnitude T_0 in the Sun
+  // reference-rate map when acceleration INDI is enabled.
+  const double thrust_for_rates = use_acceleration_indi ?
     state.applied_thrust_axis_force.norm() : direct_body_z_force.norm();
-  auto desired = sunDesiredCommand(
-    state, reference, body_z_force_for_attitude,
-    thrust_for_rates, params);
+  const auto desired = sunDesiredCommand(
+    state, reference, commanded_body_z_force_, thrust_for_rates, params);
+  const Eigen::Matrix3d rotation = quat2RotMatrix(state.attitude);
   const Eigen::Vector3d attitude_error =
     main_math::logSO3(rotation.transpose() * desired.rotation);
-  // main.tex Eq. (61).
   const Eigen::Vector3d angular_acceleration_command =
     params.KR.asDiagonal() * attitude_error +
     params.KOmega.asDiagonal() * (desired.body_rate - state.body_rate) +
     desired.angular_acceleration;
-  // main.tex Eq. (60): the PX4 allocator publishes tau_0 continuously before
-  // offboard starts, so every ROS INDI update uses the same feedback form.
-  const Eigen::Vector3d torque = state.applied_torque +
-    params.inertia * (angular_acceleration_command - state.angular_acceleration);
-  auto command = commandFromWrench(
-    reference, acceleration_command, desired, thrust, torque);
+
+  Eigen::Vector3d torque;
+  Eigen::Vector3d indi_torque_feedback = Eigen::Vector3d::Zero();
+  if (params.indi_rate_enabled) {
+    // main.tex Eq. (60), identical to the proven PX4 rate-INDI structure:
+    // tau_c = tau_0 + J (alpha_c - alpha_0). AllocationValue.allocated_torque
+    // is supplied directly as tau_0 in physical N*m.
+    // Preserve PX4's PCA decomposition: tau_feedback = tau_0 - J*alpha_0 is
+    // the high-priority part, while J*alpha_c is the remaining command.
+    indi_torque_feedback =
+      state.applied_torque - params.inertia * state.angular_acceleration;
+    torque = params.inertia * angular_acceleration_command + indi_torque_feedback;
+  } else {
+    torque = rigidBodyTorque(state, params, angular_acceleration_command);
+  }
+
+  auto command = commandFromWrench(desired, thrust, torque);
   command.desired_angular_acceleration = angular_acceleration_command;
-  // PCA priority decomposition is intentionally disabled while validating the
-  // base INDI loop. The transport publishes only the total torque above.
+  command.desired_body_rate = desired.body_rate;
+  if (params.indi_rate_enabled) {
+    command.indi_torque_feedback = indi_torque_feedback;
+    command.indi_torque_feedback_valid = true;
+  }
   return command;
 }
 

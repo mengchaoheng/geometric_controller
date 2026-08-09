@@ -55,7 +55,6 @@ Eigen::Vector3d logSO3(const Eigen::Matrix3d & R);
 Eigen::Vector3d johnsonLogSO3(const Eigen::Matrix3d & R);
 Eigen::Matrix3d johnsonLeftJacobianSO3(const Eigen::Vector3d & phi);
 Eigen::Vector3d leeSO3Error(const Eigen::Matrix3d & R, const Eigen::Matrix3d & Rd);
-Eigen::Vector3d quaternionAttitudeError(const Eigen::Vector4d & q, const Eigen::Vector4d & qd);
 Eigen::Vector4d quaternionMultiply(const Eigen::Vector4d & q, const Eigen::Vector4d & p);
 Eigen::Vector4d matrixToQuaternion(const Eigen::Matrix3d & R);
 Eigen::Matrix3d attitudeFromUnitBodyZAndHeading(

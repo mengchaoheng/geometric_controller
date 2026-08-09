@@ -17,18 +17,13 @@
 
 #include <Eigen/Dense>
 
-#include <algorithm>
-#include <cmath>
+#include <cstdint>
 
 namespace geometric_controller
 {
 
-constexpr int kErrorQuaternion = 1;
-constexpr int kErrorGeometric = 2;
-
 enum class ControllerType
 {
-  LEGACY_GEOMETRIC = 0,
   MAIN_GEOMETRIC = 1,
   MAIN_LEE = 2,
   MAIN_JOHNSON = 3,
@@ -42,6 +37,10 @@ struct VehicleState
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
   Eigen::Vector3d acceleration = Eigen::Vector3d::Zero();
+  // PX4 hrt timestamp of the VehicleLocalPosition sample that supplied the
+  // acceleration feedback. Acceleration INDI updates once per new sample and
+  // holds its thrust-vector command between samples.
+  uint64_t acceleration_sample_timestamp = 0;
   // Filtered allocated force feedback, converted to the paper's positive
   // T*b_z convention in NED.
   Eigen::Vector3d applied_thrust_axis_force = Eigen::Vector3d::Zero();
@@ -67,23 +66,22 @@ struct FlatReference
 
 struct ControllerParams
 {
-  int ctrl_mode = kErrorQuaternion;
   // All controller laws use PX4's NED/FRD convention, matching main.m.
   Eigen::Vector3d gravity = Eigen::Vector3d(0.0, 0.0, 9.81);
-  Eigen::Vector3d drag = Eigen::Vector3d::Zero();
   Eigen::Vector3d Kp = Eigen::Vector3d(10.0, 10.0, 10.0);
   Eigen::Vector3d Kv = Eigen::Vector3d(6.0, 6.0, 6.0);
-  // PX4/Gazebo includes allocation, motor dynamics, and transport/sample
-  // timing that are absent from main.m's ideal rigid body. The yaw gains are
-  // tuned separately for the df-main Iris direct-wrench path.
-  Eigen::Vector3d KR = Eigen::Vector3d(150.0, 150.0, 80.0);
-  Eigen::Vector3d KOmega = Eigen::Vector3d(50.0, 50.0, 3.0);
+  // Shared numeric defaults for the separate geometric and geometric_indi
+  // gain namespaces in main.m. In particular, yaw stiffness is
+  // intentionally much smaller than roll/pitch stiffness; replacing it with
+  // a large symmetric value excites yaw/tilt coupling on aggressive paths.
+  Eigen::Vector3d KR = Eigen::Vector3d(150.0, 150.0, 3.0);
+  Eigen::Vector3d KOmega = Eigen::Vector3d(20.0, 20.0, 8.0);
   Eigen::Matrix3d inertia =
     (Eigen::Vector3d(0.0025, 0.0021, 0.0043)).asDiagonal();
-  // False selects direct geometric thrust while retaining rotational INDI.
-  // True enables the complete main.tex translational and rotational laws.
+  // The two diagnostic switches bypass only the corresponding incremental
+  // law. main_geometric_indi always retains its own Sun reference-rate path.
+  bool indi_rate_enabled = true;
   bool indi_acceleration_enabled = true;
-  double outer_loop_rate_hz = 100.0;
   double mass = 0.75;
 };
 
@@ -95,17 +93,10 @@ struct ControllerCommand
   Eigen::Vector3d indi_torque_feedback = Eigen::Vector3d::Zero();
   bool indi_torque_feedback_valid = false;
   Eigen::Vector4d attitude = Eigen::Vector4d(1.0, 0.0, 0.0, 0.0);
-  Eigen::Vector3d reference_position = Eigen::Vector3d::Zero();
-  Eigen::Vector3d desired_acceleration = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_body_rate = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_angular_acceleration = Eigen::Vector3d::Zero();
   double collective_thrust = 0.0;
 };
-
-inline double clampUnit(double value)
-{
-  return std::max(0.0, std::min(1.0, value));
-}
 
 }  // namespace geometric_controller
 

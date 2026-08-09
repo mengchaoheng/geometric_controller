@@ -38,7 +38,7 @@ public:
 private:
   Eigen::Vector3d commanded_body_z_force_{Eigen::Vector3d::Zero()};
   bool force_command_valid_{false};
-  double outer_loop_elapsed_s_{0.0};
+  uint64_t last_acceleration_sample_timestamp_{0};
 };
 
 }  // namespace geometric_controller

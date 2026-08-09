@@ -9,7 +9,6 @@ trajectory_offboard_node:
       prearm_setpoints: 10
       setpoint_rate_hz: 250.0
       heartbeat_rate_hz: 5.0
-      publish_rate_hz: 0.0
       auto_start_retry_period_s: 1.0
       takeoff_before_trajectory: true
       use_start_transition: true
@@ -17,52 +16,48 @@ trajectory_offboard_node:
       takeoff_position_tolerance: 0.25
       takeoff_velocity_tolerance: 0.5
 
-    # PX4 callbacks cache their newest sample. The reference/translational
-    # layer uses a fixed timer; fresh angular-velocity samples trigger the
-    # wrench calculation up to inner_loop_rate_hz.
-    outer_loop_rate_hz: 100.0
-    inner_loop_rate_hz: 250.0
+    # Control rates are feedback-driven, not parameters. Acceleration INDI
+    # follows each new VehicleLocalPosition sample; rate INDI follows each new
+    # VehicleAngularVelocity sample. The panel displays the measured rates.
 
     setpoint:
       level: position
       velocity_feedforward: true
       acceleration_feedforward: true
 
-    # 1 is the ordinary ROS geometric wrench controller. Type 5 is the
-    # main.m-style INDI controller used after this baseline is stable.
-    controller_type: 1
-    ctrl_mode: 1
+    # Start with the complete main.m-style geometric INDI controller.
+    controller_type: 5
     gravity: 9.81
     mass: 0.75
     inertia_x: 0.0025
     inertia_y: 0.0021
     inertia_z: 0.0043
-    # Complete Geometric INDI: main.tex Eq. (55), (60), and (61).
+    # Enabled by default when mode 5 is selected. They remain independent
+    # diagnostic switches and can be unchecked individually in the panel.
+    indi_rate_enabled: true
     indi_acceleration_enabled: true
-    # Mirrors PX4 MPC_INDI_A_SRC=1: 2-pole LPF on EKF ax/ay/az.
+    # Match the second-order CA_FORCE_CUTOFF=8 Hz dynamics already present in
+    # AllocationValue. F0 and a0 must describe the same expansion point.
     indi_acceleration_cutoff_hz: 8.0
-    # main.m geometric-INDI inner feedback LPF for omega_0, dot(omega)_0,
-    # and allocated torque tau_0. Applied in ROS only for controller type 5.
-    indi_rate_feedback_cutoff_hz: 5.0
-    drag_dx: 0.0
-    drag_dy: 0.0
-    drag_dz: 0.0
-    Kp_x: 20.0
-    Kp_y: 20.0
-    Kp_z: 20.0
+    # PX4 MPC_INDI_F_DLY counterpart. Zero selects F0 at the acceleration
+    # sample time without an additional configured delay.
+    indi_force_delay_s: 0.0
+    Kp_x: 10.0
+    Kp_y: 10.0
+    Kp_z: 10.0
     Kv_x: 6.0
     Kv_y: 6.0
     Kv_z: 6.0
-    KR_r: 100.0
-    KR_p: 100.0
-    KR_y: 50.0
-    KOmega_r: 10.0
-    KOmega_p: 10.0
+    # Attitude and body-rate feedback gains used by ROS wrench controllers.
+    KR_r: 150.0
+    KR_p: 150.0
+    KR_y: 30.0
+    KOmega_r: 15.0
+    KOmega_p: 15.0
     KOmega_y: 10.0
     # Same convention as mavros_controllers:
     # normalizedthrust_constant = mass / total_max_thrust.
     normalizedthrust_constant: 0.022058823529
-    normalizedthrust_offset: 0.0
     normalizedtorque_constant_r: 0.319957823650
     normalizedtorque_constant_p: 0.319957823650
     normalizedtorque_constant_y: 1.962568474088

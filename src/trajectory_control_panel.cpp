@@ -43,6 +43,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/parameter_client.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include "geometric_controller/controllers/controller_factory.hpp"
 #include "geometric_controller/reference_trajectory.hpp"
@@ -150,13 +151,9 @@ private:
     auto * controller_form = new QFormLayout(controller_group);
     controller_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     addControllerCombo(controller_form);
-    addCtrlModeCombo(controller_form);
-    addDouble(
-      controller_form, "outer loop rate", "outer_loop_rate_hz", 100.0, 10.0, 250.0,
-      1.0, 1, " Hz");
-    addDouble(
-      controller_form, "inner loop rate", "inner_loop_rate_hz", 250.0, 50.0, 250.0,
-      1.0, 1, " Hz");
+    control_rate_label_ = new QLabel("Waiting for feedback rates");
+    control_rate_label_->setWordWrap(true);
+    controller_form->addRow("measured control rates", control_rate_label_);
     addDouble(controller_form, "Kp x", "Kp_x", 10.0, 0.0, 40.0, 0.1, 2, "");
     addDouble(controller_form, "Kp y", "Kp_y", 10.0, 0.0, 40.0, 0.1, 2, "");
     addDouble(controller_form, "Kp z", "Kp_z", 10.0, 0.0, 40.0, 0.1, 2, "");
@@ -165,10 +162,10 @@ private:
     addDouble(controller_form, "Kv z", "Kv_z", 6.0, 0.0, 40.0, 0.1, 2, "");
     addDouble(controller_form, "KR roll", "KR_r", 150.0, 0.0, 500.0, 1.0, 1, "");
     addDouble(controller_form, "KR pitch", "KR_p", 150.0, 0.0, 500.0, 1.0, 1, "");
-    addDouble(controller_form, "KR yaw", "KR_y", 80.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "KΩ roll", "KOmega_r", 50.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "KΩ pitch", "KOmega_p", 50.0, 0.0, 100.0, 0.1, 2, "");
-    addDouble(controller_form, "KΩ yaw", "KOmega_y", 3.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KR yaw", "KR_y", 3.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ roll", "KOmega_r", 20.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ pitch", "KOmega_p", 20.0, 0.0, 100.0, 0.1, 2, "");
+    addDouble(controller_form, "KΩ yaw", "KOmega_y", 8.0, 0.0, 100.0, 0.1, 2, "");
     addDouble(controller_form, "mass", "mass", 0.75, 0.05, 50.0, 0.001, 3, " kg");
     addDouble(
       controller_form, "inertia x", "inertia_x", 0.0025, 0.00001, 10.0,
@@ -180,10 +177,15 @@ private:
       controller_form, "inertia z", "inertia_z", 0.0043, 0.00001, 10.0,
       0.0001, 5, " kg·m²");
     addBool(
+      controller_form, "rate INDI", "indi_rate_enabled", true);
+    addBool(
       controller_form, "acceleration INDI", "indi_acceleration_enabled", true);
     addDouble(
       controller_form, "INDI accel LPF", "indi_acceleration_cutoff_hz", 8.0,
       0.0, 50.0, 0.5, 1, " Hz");
+    addDouble(
+      controller_form, "INDI force delay", "indi_force_delay_s", 0.01,
+      0.0, 0.1, 0.001, 3, " s");
     controller_layout->addWidget(controller_group);
 
     auto * normalization_group = new QGroupBox("PX4 normalization constants");
@@ -192,9 +194,6 @@ private:
     addDouble(
       normalization_form, "thrust m/Tmax", "normalizedthrust_constant",
       0.022058823529, 0.0, 1.0, 0.0001, 6, " kg/N");
-    addDouble(
-      normalization_form, "thrust offset", "normalizedthrust_offset",
-      0.0, -1.0, 1.0, 0.0001, 6, "");
     addDouble(
       normalization_form, "torque roll", "normalizedtorque_constant_r",
       0.319957823650, 0.0, 1000.0, 0.001, 6, " 1/(N·m)");
@@ -326,9 +325,11 @@ private:
 
     controller_combo_ = new QComboBox();
     const auto & names = geometric_controller::supportedControllerTypes();
-    for (size_t id = 0; id < names.size(); ++id) {
+    for (size_t index = 0; index < names.size(); ++index) {
       controller_combo_->addItem(
-        QString::fromStdString(names[id]), static_cast<int>(id));
+        QString::fromStdString(names[index]),
+        static_cast<int>(geometric_controller::ControllerType::MAIN_GEOMETRIC) +
+        static_cast<int>(index));
     }
     form->addRow("controller_type", controller_combo_);
 
@@ -336,25 +337,30 @@ private:
       controller_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
       [this](int index) {
         if (index >= 0 && !updating_ui_) {
-          setIntegerParameter("controller_type", controller_combo_->itemData(index).toInt());
-        }
-      });
-  }
-
-  void addCtrlModeCombo(QFormLayout * form)
-  {
-    registerParameter("ctrl_mode");
-
-    ctrl_mode_combo_ = new QComboBox();
-    ctrl_mode_combo_->addItem("quaternion error", geometric_controller::kErrorQuaternion);
-    ctrl_mode_combo_->addItem("geometric error", geometric_controller::kErrorGeometric);
-    form->addRow("ctrl_mode", ctrl_mode_combo_);
-
-    QObject::connect(
-      ctrl_mode_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-      [this](int index) {
-        if (index >= 0 && !updating_ui_) {
-          setIntegerParameter("ctrl_mode", ctrl_mode_combo_->itemData(index).toInt());
+          const int type = controller_combo_->itemData(index).toInt();
+          if (type == static_cast<int>(
+              geometric_controller::ControllerType::MAIN_GEOMETRIC_INDI))
+          {
+            // Selecting mode 5 means selecting the complete controller by
+            // default. The two boxes remain independent after entry for
+            // diagnostic flights.
+            for (const auto * name : {"indi_rate_enabled", "indi_acceleration_enabled"}) {
+              const auto iter = bool_controls_.find(name);
+              if (iter != bool_controls_.end()) {
+                const QSignalBlocker blocker(iter->second);
+                iter->second->setChecked(true);
+              }
+            }
+            setParameters(
+              {
+                rclcpp::Parameter("controller_type", static_cast<int64_t>(type)),
+                rclcpp::Parameter("indi_rate_enabled", true),
+                rclcpp::Parameter("indi_acceleration_enabled", true),
+              },
+              "main_geometric_indi + both INDI loops");
+          } else {
+            setIntegerParameter("controller_type", type);
+          }
         }
       });
   }
@@ -475,6 +481,14 @@ private:
 
   void configureTimers()
   {
+    control_rate_status_subscription_ =
+      node_->create_subscription<std_msgs::msg::String>(
+      "/controller/control_rate_status", 10,
+      [this](const std_msgs::msg::String::SharedPtr msg) {
+        if (control_rate_label_) {
+          control_rate_label_->setText(QString::fromStdString(msg->data));
+        }
+      });
     ros_timer_ = new QTimer(window_.get());
     QObject::connect(ros_timer_, &QTimer::timeout, [this]() {
         if (!rclcpp::ok()) {
@@ -546,12 +560,6 @@ private:
         setControllerTypeUi(static_cast<int>(parameter.as_int()));
         continue;
       }
-      if (name == "ctrl_mode" &&
-        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
-      {
-        setCtrlModeUi(static_cast<int>(parameter.as_int()));
-        continue;
-      }
       if (name == "omega_value" &&
         parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
       {
@@ -593,23 +601,11 @@ private:
 
   void setControllerTypeUi(int type)
   {
-    const int clamped = std::clamp(type, 0, 6);
+    const int clamped = std::clamp(type, 1, 6);
     const QSignalBlocker blocker(controller_combo_);
     const int index = controller_combo_->findData(clamped);
     if (index >= 0) {
       controller_combo_->setCurrentIndex(index);
-    }
-  }
-
-  void setCtrlModeUi(int mode)
-  {
-    const int clamped = std::clamp(
-      mode, geometric_controller::kErrorQuaternion,
-      geometric_controller::kErrorGeometric);
-    const QSignalBlocker blocker(ctrl_mode_combo_);
-    const int index = ctrl_mode_combo_->findData(clamped);
-    if (index >= 0) {
-      ctrl_mode_combo_->setCurrentIndex(index);
     }
   }
 
@@ -638,25 +634,32 @@ private:
 
   void setParameter(const rclcpp::Parameter & parameter)
   {
+    setParameters({parameter}, parameter.get_name());
+  }
+
+  void setParameters(
+    const std::vector<rclcpp::Parameter> & parameters, const std::string & label)
+  {
     if (!parameter_client_->service_is_ready()) {
       setStatus("Target not ready");
       return;
     }
 
-    const auto name = parameter.get_name();
     parameter_client_->set_parameters(
-      {parameter},
+      parameters,
       [this,
-      name](std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future) {
+      label](std::shared_future<std::vector<rcl_interfaces::msg::SetParametersResult>> future) {
         try {
           const auto results = future.get();
-          if (!results.empty() && !results.front().successful) {
-            setStatus(
-              "Rejected " + QString::fromStdString(name) + ": " +
-              QString::fromStdString(results.front().reason));
-            return;
+          for (const auto & result : results) {
+            if (!result.successful) {
+              setStatus(
+                "Rejected " + QString::fromStdString(label) + ": " +
+                QString::fromStdString(result.reason));
+              return;
+            }
           }
-          setStatus("Updated " + QString::fromStdString(name));
+          setStatus("Updated " + QString::fromStdString(label));
         } catch (const std::exception & exception) {
           setStatus("Update failed: " + QString::fromStdString(exception.what()));
         }
@@ -684,14 +687,15 @@ private:
   std::string target_node_;
   std::unique_ptr<QWidget> window_;
   QLabel * status_label_{nullptr};
+  QLabel * control_rate_label_{nullptr};
   QComboBox * trajectory_combo_{nullptr};
   QComboBox * controller_combo_{nullptr};
-  QComboBox * ctrl_mode_combo_{nullptr};
   QStackedWidget * shape_stack_{nullptr};
   QSlider * omega_slider_{nullptr};
   QDoubleSpinBox * omega_spin_{nullptr};
   QTimer * ros_timer_{nullptr};
   QTimer * sync_timer_{nullptr};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_rate_status_subscription_;
   std::vector<std::string> parameter_names_;
   std::unordered_map<std::string, QDoubleSpinBox *> double_controls_;
   std::unordered_map<std::string, QCheckBox *> bool_controls_;

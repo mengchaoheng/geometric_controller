@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <memory>
 
-#include "geometric_controller/controllers/legacy_geometric_controller.hpp"
 #include "geometric_controller/controllers/main_geometric_controller.hpp"
 #include "geometric_controller/controllers/main_geometric_indi_controller.hpp"
 #include "geometric_controller/controllers/main_johnson_controller.hpp"
@@ -29,7 +28,7 @@ namespace geometric_controller
 
 ControllerType controllerTypeFromId(int id)
 {
-  const int minimum = static_cast<int>(ControllerType::LEGACY_GEOMETRIC);
+  const int minimum = static_cast<int>(ControllerType::MAIN_GEOMETRIC);
   const int maximum = static_cast<int>(ControllerType::PX4_DIRECT);
   return static_cast<ControllerType>(std::clamp(id, minimum, maximum));
 }
@@ -37,8 +36,6 @@ ControllerType controllerTypeFromId(int id)
 std::string controllerTypeName(ControllerType type)
 {
   switch (type) {
-    case ControllerType::LEGACY_GEOMETRIC:
-      return "legacy_geometric";
     case ControllerType::MAIN_GEOMETRIC:
       return "main_geometric";
     case ControllerType::MAIN_LEE:
@@ -63,8 +60,6 @@ bool isRosController(ControllerType type)
 std::shared_ptr<ControllerBase> makeController(ControllerType type)
 {
   switch (type) {
-    case ControllerType::LEGACY_GEOMETRIC:
-      return std::make_shared<LegacyGeometricController>();
     case ControllerType::MAIN_GEOMETRIC:
       return std::make_shared<MainGeometricController>();
     case ControllerType::MAIN_LEE:
@@ -84,7 +79,6 @@ std::shared_ptr<ControllerBase> makeController(ControllerType type)
 const std::vector<std::string> & supportedControllerTypes()
 {
   static const std::vector<std::string> names{
-    "legacy_geometric",
     "main_geometric",
     "main_lee",
     "main_johnson",

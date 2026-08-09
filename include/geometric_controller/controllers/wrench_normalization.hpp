@@ -38,14 +38,13 @@ struct NormalizedWrench
 
 inline NormalizedWrench normalizeWrench(
   const ControllerCommand & command, double mass,
-  double normalizedthrust_constant, double normalizedthrust_offset,
+  double normalizedthrust_constant,
   const Eigen::Vector3d & normalizedtorque_constant)
 {
   NormalizedWrench result;
   result.torque = normalizedtorque_constant.asDiagonal() * command.torque;
   result.requested_thrust =
-    normalizedthrust_constant * command.collective_thrust / mass +
-    normalizedthrust_offset;
+    normalizedthrust_constant * command.collective_thrust / mass;
   result.saturated =
     (result.torque.array().abs() > 1.0).any() ||
     result.requested_thrust<0.0 || result.requested_thrust>1.0;

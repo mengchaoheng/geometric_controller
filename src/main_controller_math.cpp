@@ -107,15 +107,6 @@ Eigen::Vector4d quaternionMultiply(const Eigen::Vector4d & q, const Eigen::Vecto
   return quat;
 }
 
-Eigen::Vector3d quaternionAttitudeError(const Eigen::Vector4d & q, const Eigen::Vector4d & qd)
-{
-  const Eigen::Vector4d inverse(1.0, -1.0, -1.0, -1.0);
-  const Eigen::Vector4d qe = quaternionMultiply(inverse.asDiagonal() * q, qd);
-  return Eigen::Vector3d(2.0 * std::copysign(1.0, qe(0)) * qe(1),
-                         2.0 * std::copysign(1.0, qe(0)) * qe(2),
-                         2.0 * std::copysign(1.0, qe(0)) * qe(3));
-}
-
 Eigen::Vector4d matrixToQuaternion(const Eigen::Matrix3d & R)
 {
   return rot2Quaternion(R);
@@ -203,7 +194,7 @@ SunReferenceRates sunFlatnessReferenceRates(
     return rates;
   }
 
-  const Eigen::Matrix3d R = quat2RotMatrix(state.attitude / state.attitude.norm());
+  const Eigen::Matrix3d R = quat2RotMatrix(state.attitude);
   const Eigen::Vector3d b1 = R.col(0);
   const Eigen::Vector3d b2 = R.col(1);
   const Eigen::Vector3d b3 = R.col(2);
