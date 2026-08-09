@@ -2,252 +2,137 @@
 
 [English](README.md) | **简体中文**
 
-`geometric_controller` 是一个面向 PX4 Offboard 的 ROS 2 轨迹跟踪与全 wrench
-控制器包。它生成解析轨迹，在 ROS 中计算期望推力和力矩，并将结果发送给 PX4
-control allocator。项目提供 RViz 可视化和运行时调参面板。
+`geometric_controller` 是一个面向 PX4 与 ROS 2 的飞行器轨迹跟踪控制软件包，
+用于解析参考轨迹生成、几何控制、增量非线性动态逆（INDI）以及 PX4 Offboard
+飞行。ROS 侧计算总推力与机体系控制力矩，PX4 负责控制分配和执行器驱动。
 
-控制器内部统一使用：
-
-- 世界坐标系：NED；
-- 机体坐标系：FRD；
-- 物理量：SI 单位；
-- RViz 显示：可配置为 ENU，不改变控制器内部坐标系。
-
-## 系统结构
-
-```text
-ReferenceTrajectory
-  -> FlatReference {p, v, a, jerk, snap, yaw, yaw_rate, yaw_accel}
-  -> ROS controller
-  -> physical thrust [N] and torque [N*m]
-  -> fixed vehicle normalization
-  -> VehicleThrustSetpoint + VehicleTorqueSetpoint
-  -> PX4 control allocator
-  -> actuators
-
-PX4 state/allocator feedback
-  -> VehicleLocalPosition
-  -> VehicleAttitude
-  -> VehicleAngularVelocity
-  -> AllocationValue
-  -> ROS controller
-```
-
-模式 1–5 令 `OffboardControlMode.thrust_and_torque=true`，绕过 PX4 的位置、
-姿态和角速度控制器，但保留 PX4 control allocator 与执行器输出。模式 6 发布
-`TrajectorySetpoint`，使用 PX4 内置串级控制器。
+算法结构与参考轨迹实现主要参照公开的
+[`main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)。
 
 ## 控制器
 
-| ID | 名称 | 控制输出 |
-|---:|---|---|
-| 1 | `main_geometric` | ROS 计算物理推力和力矩 |
-| 2 | `main_lee` | ROS 计算物理推力和力矩 |
-| 3 | `main_johnson` | ROS 计算物理推力和力矩 |
-| 4 | `main_sun_dfbc` | ROS 计算物理推力和力矩 |
-| 5 | `main_geometric_indi` | ROS 计算 Geometric INDI 推力和力矩 |
-| 6 | `px4_direct` | PX4 内置位置、姿态和角速度控制链 |
+项目提供以下控制器：
 
-默认控制器为 `main_geometric_indi`，rate INDI 和 acceleration INDI 默认开启。
+1. `main_geometric` [[1]](#参考实现与文献)
+2. `main_lee` [[2]](#参考实现与文献)
+3. `main_johnson` [[3]](#参考实现与文献)
+4. `main_sun_dfbc` [[4]](#参考实现与文献)
+5. `main_geometric_indi` [[1, 4, 5]](#参考实现与文献)
+6. `px4_direct` [[6]](#参考实现与文献)
 
-控制器名称与参考 MATLAB 实现的对应关系：
+其中 `main_geometric_indi` 的具体实现以 [1] 为准；[4] 对应其参考角运动生成方法，
+[5] 对应 INDI 与微分平坦性控制基础。
 
-| ROS 控制器 | `main.m` 实现 |
-|---|---|
-| `main_geometric` | `controllerPDGeometric` |
-| `main_lee` | Lee controller |
-| `main_johnson` | Johnson controller |
-| `main_sun_dfbc` | Sun DFBC controller |
-| `main_geometric_indi` | `controllerGeometricINDI` |
+模式 1–5 在 ROS 中完成轨迹跟踪、姿态与角速度控制，并向 PX4 发布总推力和
+机体系控制力矩指令；PX4 保留控制分配与执行器输出。`px4_direct` 发布位置轨迹
+指令并使用 PX4 内置串级控制器。
 
-`main_geometric` 和 `main_geometric_indi` 使用不同的姿态参考导数构造。关闭模式 5
-中的某个 INDI 开关只会把对应增量律替换为直接力或力矩计算，仍保留模式 5 的
-Sun 参考姿态、角速度和角加速度生成链。
+默认控制器为 `main_geometric_indi`，其平动 INDI 与转动 INDI 默认开启。
+`main_geometric` 对应公开 MATLAB 实现中的 `controllerPDGeometric`，
+`main_geometric_indi` 对应 `controllerGeometricINDI`。两者采用不同的期望姿态
+导数构造方法；关闭模式 5 的 INDI 开关仅旁路相应增量控制律，不改变其参考姿态
+与参考角运动生成方法。
 
 ## Geometric INDI
 
-本节只描述当前源代码的数据接口和控制计算，并以公开的 `main.m` 为实现参考。
-模式 5 的主要控制律为：
+Geometric INDI 由平动与转动两个增量控制环组成：
 
 ```text
-a_c = a_r + Kp (p_r - p) + Kv (v_r - v)
-F_c = F_0 - m (a_c - a_0)
+a_c = a_r + Kp(p_r - p) + Kv(v_r - v)
+F_c = F_0 - m(a_c - a_0)
 
-alpha_c = KR Log(R^T R_c) + KOmega (omega_r - omega_0) + alpha_r
-tau_c = tau_0 + J (alpha_c - alpha_0)
+alpha_c = KR Log(R^T R_c) + KOmega(omega_r - omega) + alpha_r
+tau_c = tau_0 + J(alpha_c - alpha_0)
 ```
 
-`R_c` 由期望推力方向和参考 yaw 构造。`omega_r` 与 `alpha_r` 使用 Sun 方法，
-根据参考 jerk、snap、当前姿态/角速度和推力生成。
+期望姿态由期望推力方向与参考航向构造；参考角速度和角加速度由参考轨迹的
+高阶导数通过 Sun 方法计算。
 
-### Acceleration INDI 信号流
+### 平动 INDI
 
-```text
-VehicleLocalPosition.ax/ay/az
-  -> ROS 二阶低通(indi_acceleration_cutoff_hz)
-  -> a_0
+- `a_0`：来自 `VehicleLocalPosition` 的加速度，经 ROS 二阶低通滤波器处理；
+- `F_0`：来自 PX4 `AllocationValue.allocated_force`；该信号已在 PX4 中经过
+  `CA_FORCE_CUTOFF`，ROS 不重复滤波；
+- `indi_acceleration_cutoff_hz`：ROS 加速度反馈滤波器截止频率；
+- `indi_force_delay_s`：按 PX4 HRT 时间基从分配力历史中选择或插值 `F_0`。
 
-PX4 final actuator setpoint x effectiveness matrix
-  -> PX4 二阶低通(CA_FORCE_CUTOFF)
-  -> AllocationValue.allocated_force
-  -> 在 AllocationValue 到达时用对应姿态从 FRD 转换到 NED
-  -> PX4 时间戳历史与插值(indi_force_delay_s)
-  -> F_0
-
-F_c = F_0 - mass * (a_c - a_0)
-```
-
-ROS 固定采用与 PX4 `MPC_INDI_A_SRC=1`、`MPC_INDI_F_SRC=0` 对应的数据源。
-`allocated_force` 已在 PX4 中经过 `CA_FORCE_CUTOFF`，ROS 不重复滤波该字段。
-
-`VehicleLocalPosition.timestamp_sample` 和 `AllocationValue.timestamp` 都使用 PX4 HRT
-微秒时基。ROS 以加速度样本时刻减去 `indi_force_delay_s`，从分配力历史中选择或
-插值得到 `F_0`；不使用 ROS 消息接收时间进行对齐。参数为零时不附加延迟。
-
-### Rate INDI 信号流
-
-```text
-VehicleAngularVelocity.xyz
-  -> omega_0
-
-VehicleAngularVelocity.xyz_derivative
-  -> alpha_0
-
-PX4 final actuator setpoint x effectiveness matrix
-  -> PX4 二阶低通(CA_TORQ_CUTOFF)
-  -> AllocationValue.allocated_torque
-  -> tau_0
-
-tau_c = tau_0 + J * (alpha_c - alpha_0)
-```
-
-ROS 直接使用 PX4 发布的角速度、角加速度和已分配力矩，不在 ROS 中增加 rate
-反馈滤波、延迟或时间戳配对。相关反馈带宽由 PX4 参数决定：
-
-| 信号 | PX4 处理参数 | ROS 处理 |
-|---|---|---|
-| `omega_0` | `IMU_GYRO_CUTOFF` 和 notch filters | 直接使用 |
-| `alpha_0` | `IMU_DGYRO_CUTOFF` | 直接使用 |
-| `tau_0` | `CA_TORQ_CUTOFF` | 直接使用 |
-| `F_0` | `CA_FORCE_CUTOFF` | 坐标转换、历史选择和插值 |
-| `a_0` | 无 ROS 前置 INDI 低通 | `indi_acceleration_cutoff_hz` 二阶低通 |
-
-项目当前 PX4 配置采用：
-
-```text
-IMU_GYRO_CUTOFF=125
-IMU_DGYRO_CUTOFF=10
-CA_TORQ_CUTOFF=8
-CA_FORCE_CUTOFF=8
-```
-
-ROS 中对应的 acceleration INDI 参数为：
+`VehicleLocalPosition.timestamp_sample` 与 `AllocationValue.timestamp` 使用相同的
+PX4 HRT 时基，因而延迟补偿不依赖 ROS 消息接收时间。当前默认参数为：
 
 ```yaml
 indi_acceleration_cutoff_hz: 8.0
 indi_force_delay_s: 0.0
 ```
 
-### 启动与开关行为
+### 转动 INDI
 
-`indi_rate_enabled` 和 `indi_acceleration_enabled` 可独立设置：
+- `omega`：直接使用 `VehicleAngularVelocity.xyz`；
+- `alpha_0`：直接使用 `VehicleAngularVelocity.xyz_derivative`；
+- `tau_0`：直接使用 `AllocationValue.allocated_torque`。
 
-| Rate INDI | Acceleration INDI | 模式 5 行为 |
-|---|---|---|
-| 关 | 关 | Sun 参考链 + 直接期望力 + 直接期望力矩 |
-| 开 | 关 | 直接期望力 + rate INDI |
-| 关 | 开 | acceleration INDI + 直接期望力矩 |
-| 开 | 开 | 完整 Geometric INDI |
+转动 INDI 不在 ROS 中附加滤波或延迟。角速度、角加速度和已分配力矩的带宽
+分别由 PX4 的 `IMU_GYRO_CUTOFF`、`IMU_DGYRO_CUTOFF` 和
+`CA_TORQ_CUTOFF` 决定。
 
-控制器在第一份有限 `AllocationValue` 到达前使用直接计算产生初始 wrench；反馈
-建立后接入已启用的增量律。运行过程不设置固定反馈年龄门限。
+### INDI 开关与初始化
 
-### PCA 力矩分解
+`indi_acceleration_enabled` 和 `indi_rate_enabled` 可独立设置。关闭某一开关时，
+控制器以直接模型反演替代相应增量控制律。第一份有效 `AllocationValue` 建立前，
+控制器使用直接计算生成初始推力与力矩；分配反馈建立后接入已启用的 INDI 环。
 
-启用 rate INDI 时，ROS 按 PX4 的定义发送总力矩及 INDI 反馈分量：
+### PCA 力矩优先级
 
-```text
-tau_feedback = tau_0 - J * alpha_0
-tau_c = J * alpha_c + tau_feedback
-
-VehicleTorqueSetpoint.xyz = normalized(tau_c)
-VehicleTorqueSetpoint.xyz_indi_feedback = normalized(tau_feedback)
-VehicleTorqueSetpoint.xyz_indi_feedback_valid = true
-```
-
-两个分量使用相同的力矩归一化和最终裁剪比例。ROS 始终保留该分解，但不决定
-是否启用 PCA。PX4 根据机型、分配矩阵和 `CA_METHOD` 选择是否使用它：df4 的
-PCA 路径可消费优先级分量，iris 的 WLS 路径忽略该分量并使用总力矩。
-
-## Wrench 归一化
-
-ROS 控制器先计算物理 wrench，再转换为 PX4 allocator 接收的无量纲 setpoint：
+启用转动 INDI 时，ROS 同时发送总力矩和 INDI 反馈分量：
 
 ```text
-T_normalized = normalizedthrust_constant * T / mass
-tau_normalized = diag(normalizedtorque_constant_r,
-                      normalizedtorque_constant_p,
-                      normalizedtorque_constant_y) * tau
+tau_feedback = tau_0 - J alpha_0
+tau_c = J alpha_c + tau_feedback
 ```
 
-参数与 PX4 分配器尺度的关系为：
+ROS 只保留并发送该分解，不决定 PCA 是否启用。PX4 根据机型、控制分配矩阵和
+`CA_METHOD` 选择是否使用优先级分量：df4 的 PCA 配置可使用该分量，iris 的
+WLS 配置只使用总力矩。
+
+## 控制指令归一化
+
+控制器输出的总推力和机体系力矩在发送至 PX4 前按机型参数归一化：
+
+```text
+T_n = normalizedthrust_constant * T / mass
+tau_n = diag(normalizedtorque_constant_r,
+             normalizedtorque_constant_p,
+             normalizedtorque_constant_y) tau
+```
+
+其中：
 
 ```text
 normalizedthrust_constant = mass / T_max = MPC_THR_HOVER / g
-normalizedtorque_constant_* = AllocationValue.torque_setpoint_scale[*]
 ```
 
-当前 iris 参数位于 [config/vehicles/iris.yaml](config/vehicles/iris.yaml)。切换机型时
-必须同步质量、惯量和推力/力矩归一化常数。
+iris 的质量、惯量与归一化参数位于
+[config/vehicles/iris.yaml](config/vehicles/iris.yaml)。更换机型时应同时更新这些
+参数，并与 PX4 控制分配模型保持一致。
 
-## 控制频率与 DDS
+## 参考轨迹与控制频率
 
-ROS wrench 控制由反馈消息驱动：
+项目提供水平八字、垂直八字、螺旋翻转、正弦翻转和圆轨迹。参考轨迹包含位置、
+速度、加速度、jerk、snap 以及航向导数，可通过调参面板或 ROS 参数修改。
 
-- 新的 `VehicleAngularVelocity` 触发 rate 控制和 wrench 发布；
-- 新的 `VehicleLocalPosition` 更新 acceleration INDI；
-- 两次位置状态之间保持最近的期望推力向量；
-- 姿态和 `AllocationValue` 以各自频率更新缓存。
+控制计算由 PX4 状态反馈驱动：`VehicleAngularVelocity` 触发转动控制与指令发布，
+`VehicleLocalPosition` 触发平动 INDI 更新。因此控制频率由实际状态反馈频率决定，
+不是独立调参量。可通过以下话题查看实测频率：
 
-`offboard.setpoint_rate_hz` 用于轨迹参考、预览和模式 6 的 PX4 setpoint 刷新，
-不是 ROS wrench 控制频率。实际频率可从调参面板或状态话题读取。
-
-PX4 DDS 配置应允许以下输出按源频率发送：
-
-```yaml
-- topic: /fmu/out/vehicle_angular_velocity
-  type: px4_msgs::msg::VehicleAngularVelocity
-  rate_limit: unlimited
-- topic: /fmu/out/vehicle_attitude
-  type: px4_msgs::msg::VehicleAttitude
-  rate_limit: unlimited
-- topic: /fmu/out/vehicle_local_position
-  type: px4_msgs::msg::VehicleLocalPosition
-  rate_limit: unlimited
-- topic: /fmu/out/allocation_value
-  type: px4_msgs::msg::AllocationValue
+```bash
+ros2 topic echo /controller/control_rate_status --once
 ```
 
-## 轨迹
-
-`ReferenceTrajectory` 提供位置、速度、加速度、jerk、snap 及 yaw 导数。当前配置
-包括：
-
-- `figure8_horizontal`
-- `figure8_vertical`
-- `helix_flip`
-- `helix_flip_y`
-- `flip_loop_sine`
-- `fast_circle`
-
-轨迹类型由 `trajName` 设置，`omega_value` 设置相位速度。起飞流程先到达周期轨迹
-起点，再进入周期运动。`trajectory_yaw_lock=true` 时使用
-`trajectory_yaw_fixed`，同时令 yaw rate 和 yaw acceleration 为零；滚转和俯仰
-参考导数仍由 Sun 映射生成。
+PX4 DDS 配置应将 `vehicle_angular_velocity`、`vehicle_attitude`、
+`vehicle_local_position` 和 `allocation_value` 按源频率发送。
 
 ## 安装
 
-验证环境：Ubuntu 24.04、ROS 2 Jazzy、PX4 v1.18 系列和
+验证环境为 Ubuntu 24.04、ROS 2 Jazzy、PX4 v1.18 系列和
 `px4_msgs release/1.18`。
 
 ### PX4
@@ -262,7 +147,7 @@ make px4_sitl
 
 ### px4_msgs
 
-本项目需要 `AllocationValue` 和扩展后的 `VehicleTorqueSetpoint`：
+本项目使用扩展的 `AllocationValue` 与 `VehicleTorqueSetpoint` 消息：
 
 ```bash
 cd ~/ws_sensor_combined/src
@@ -273,7 +158,7 @@ git -C px4_msgs apply \
   ../geometric_controller/patches/px4_msgs-release-1.18.patch
 ```
 
-消息字段顺序和类型必须与 PX4 `df-main` 一致。
+消息字段顺序和类型必须与 PX4 `df-main` 保持一致。
 
 ### 编译
 
@@ -286,12 +171,9 @@ source install/setup.bash
 
 ## 启动
 
-本项目有两种启动方式。
+项目提供两种启动方式。
 
 ### 方式一：一键启动
-
-一条 launch 命令启动 PX4 SITL、Micro XRCE-DDS Agent、本项目控制节点、RViz
-和调参面板：
 
 ```bash
 cd ~/ws_sensor_combined
@@ -300,9 +182,11 @@ source install/setup.bash
 ros2 launch geometric_controller sitl_geometric_controller.launch.py
 ```
 
+该命令启动 PX4 SITL、Micro XRCE-DDS Agent、控制节点、RViz 和调参面板。
+
 ### 方式二：三个终端分别启动
 
-终端 1，启动 PX4 SITL 和 `gz_iris`：
+终端 1，启动 PX4 SITL：
 
 ```bash
 cd ~/PX4-Autopilot
@@ -315,7 +199,7 @@ make px4_sitl gz_iris
 MicroXRCEAgent udp4 -p 8888
 ```
 
-终端 3，启动本项目的控制节点、RViz 和调参面板：
+终端 3，启动本项目：
 
 ```bash
 cd ~/ws_sensor_combined
@@ -324,34 +208,43 @@ source install/setup.bash
 ros2 launch geometric_controller geometric_controller.launch.py
 ```
 
-## 配置与运行时操作
+## 配置
 
-主要配置文件：
+- [config/controller.yaml](config/controller.yaml)：控制器、INDI、轨迹、Offboard
+  与可视化参数；
+- [config/vehicles/iris.yaml](config/vehicles/iris.yaml)：机型动力学与控制指令归一化
+  参数。
 
-- [config/controller.yaml](config/controller.yaml)：控制器、INDI、轨迹、Offboard、
-  PX4 话题和可视化参数；
-- [config/vehicles/iris.yaml](config/vehicles/iris.yaml)：机型质量、惯量和归一化常数。
-
-常用运行时参数：
+运行时可通过调参面板或 ROS 参数切换控制器、轨迹及 INDI 开关：
 
 ```bash
 ros2 param set /trajectory_offboard_node controller_type 5
 ros2 param set /trajectory_offboard_node indi_rate_enabled true
 ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
-ros2 param set /trajectory_offboard_node omega_value 0.5
 ```
 
-调参面板可设置轨迹、控制器、INDI 开关、`Kp/Kv/KR/KOmega`、质量、惯量和
-wrench 归一化参数，并显示状态反馈与控制回调的实测频率。
+## 参考实现与文献
 
-查看控制频率状态：
+1. C. Meng, [`UAV_Algorithm_Benchmark: main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
+   开源 MATLAB 飞行控制算法基准。
+2. T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a
+   Quadrotor UAV on SE(3),” *49th IEEE Conference on Decision and Control*,
+   pp. 5420–5425, 2010. [doi:10.1109/CDC.2010.5717652](https://doi.org/10.1109/CDC.2010.5717652)
+3. J. C. Johnson and R. W. Beard, “Globally-Attractive Logarithmic Geometric
+   Control of a Quadrotor for Aggressive Trajectory Tracking,” *IEEE Control
+   Systems Letters*, 2022.
+   [doi:10.1109/LCSYS.2022.3141066](https://doi.org/10.1109/LCSYS.2022.3141066)
+4. S. Sun, A. Romero, P. Foehn, E. Kaufmann, and D. Scaramuzza, “A Comparative
+   Study of Nonlinear MPC and Differential-Flatness-Based Control for Quadrotor
+   Agile Flight,” *IEEE Transactions on Robotics*, vol. 38, pp. 3357–3373,
+   2022. [doi:10.1109/TRO.2022.3177279](https://doi.org/10.1109/TRO.2022.3177279)
+5. E. Tal and S. Karaman, “Accurate Tracking of Aggressive Quadrotor
+   Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential
+   Flatness,” *IEEE Transactions on Control Systems Technology*, vol. 29,
+   no. 3, pp. 1203–1218, 2021.
+   [doi:10.1109/TCST.2020.3001117](https://doi.org/10.1109/TCST.2020.3001117)
+6. L. Meier and The PX4 Contributors, [`PX4 Autopilot`](https://github.com/PX4/PX4-Autopilot),
+   Zenodo. [doi:10.5281/zenodo.595432](https://doi.org/10.5281/zenodo.595432)
 
-```bash
-ros2 topic echo /controller/control_rate_status --once
-```
-
-## 参考
-
-- [UAV_Algorithm_Benchmark / main.m](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
-- [DuctedFanUAV-Autopilot df-main](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main)
-- [PX4 ROS 2 Offboard Control](https://docs.px4.io/main/en/ros2/offboard_control)
+本项目使用的 PX4 固件实现为
+[`DuctedFanUAV-Autopilot: df-main`](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main)。

@@ -2,260 +2,150 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-`geometric_controller` is a ROS 2 package for PX4 Offboard trajectory tracking
-and full-wrench control. It generates analytic trajectories, computes desired
-physical thrust and torque in ROS, and sends them to the PX4 control allocator.
-RViz visualization and a runtime tuning panel are included.
+`geometric_controller` is a PX4–ROS 2 trajectory-tracking control package for
+aerial vehicles. It provides analytic reference generation, geometric control,
+incremental nonlinear dynamic inversion (INDI), and PX4 Offboard operation.
+ROS computes collective thrust and body-moment commands; PX4 performs control
+allocation and actuator output.
 
-The controller uses NED world coordinates, FRD body coordinates, and SI units.
-RViz can display ENU coordinates without changing the internal control frame.
-
-## Architecture
-
-```text
-ReferenceTrajectory
-  -> FlatReference {p, v, a, jerk, snap, yaw, yaw_rate, yaw_accel}
-  -> ROS controller
-  -> physical thrust [N] and torque [N*m]
-  -> fixed vehicle normalization
-  -> VehicleThrustSetpoint + VehicleTorqueSetpoint
-  -> PX4 control allocator
-  -> actuators
-
-PX4 state/allocator feedback
-  -> VehicleLocalPosition
-  -> VehicleAttitude
-  -> VehicleAngularVelocity
-  -> AllocationValue
-  -> ROS controller
-```
-
-Modes 1–5 set `OffboardControlMode.thrust_and_torque=true`. They bypass the PX4
-position, attitude, and rate controllers while retaining PX4 control allocation
-and actuator output. Mode 6 publishes `TrajectorySetpoint` and uses the built-in
-PX4 controller cascade.
+The controller structure and reference trajectories follow the public
+[`main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
+implementation.
 
 ## Controllers
 
-| ID | Name | Output |
-|---:|---|---|
-| 1 | `main_geometric` | Physical thrust and torque from ROS |
-| 2 | `main_lee` | Physical thrust and torque from ROS |
-| 3 | `main_johnson` | Physical thrust and torque from ROS |
-| 4 | `main_sun_dfbc` | Physical thrust and torque from ROS |
-| 5 | `main_geometric_indi` | Geometric INDI thrust and torque from ROS |
-| 6 | `px4_direct` | Built-in PX4 position, attitude, and rate control |
+The package provides:
 
-The default is `main_geometric_indi`, with rate and acceleration INDI enabled.
+1. `main_geometric` [[1]](#reference-implementations-and-literature)
+2. `main_lee` [[2]](#reference-implementations-and-literature)
+3. `main_johnson` [[3]](#reference-implementations-and-literature)
+4. `main_sun_dfbc` [[4]](#reference-implementations-and-literature)
+5. `main_geometric_indi` [[1, 4, 5]](#reference-implementations-and-literature)
+6. `px4_direct` [[6]](#reference-implementations-and-literature)
 
-Controller mapping to the MATLAB reference implementation:
+For `main_geometric_indi`, [1] defines the specific implementation, [4]
+supports its angular-reference construction, and [5] provides the INDI and
+differential-flatness control basis.
 
-| ROS controller | `main.m` implementation |
-|---|---|
-| `main_geometric` | `controllerPDGeometric` |
-| `main_lee` | Lee controller |
-| `main_johnson` | Johnson controller |
-| `main_sun_dfbc` | Sun DFBC controller |
-| `main_geometric_indi` | `controllerGeometricINDI` |
+Modes 1–5 perform trajectory, attitude, and angular-rate control in ROS and
+publish collective-thrust and body-moment commands to PX4. PX4 retains control
+allocation and actuator output. `px4_direct` publishes position references and
+uses the built-in PX4 controller cascade.
 
-`main_geometric` and `main_geometric_indi` use different constructions for the
-desired attitude derivatives. Disabling either INDI switch in mode 5 replaces
-only that incremental law with direct force or torque computation; the mode 5
-Sun attitude, angular-rate, and angular-acceleration reference path remains in use.
+The default is `main_geometric_indi`, with translational and rotational INDI
+enabled. `main_geometric` corresponds to `controllerPDGeometric` in the public
+MATLAB implementation, while `main_geometric_indi` corresponds to
+`controllerGeometricINDI`. They use different desired-attitude derivative
+constructions. Disabling an INDI switch in mode 5 bypasses only the associated
+incremental law and preserves its reference-attitude and angular-motion
+generation method.
 
 ## Geometric INDI
 
-This section documents the current source-code data path and control computation,
-using the public `main.m` as the implementation reference. Mode 5 implements:
+Geometric INDI consists of translational and rotational incremental loops:
 
 ```text
-a_c = a_r + Kp (p_r - p) + Kv (v_r - v)
-F_c = F_0 - m (a_c - a_0)
+a_c = a_r + Kp(p_r - p) + Kv(v_r - v)
+F_c = F_0 - m(a_c - a_0)
 
-alpha_c = KR Log(R^T R_c) + KOmega (omega_r - omega_0) + alpha_r
-tau_c = tau_0 + J (alpha_c - alpha_0)
+alpha_c = KR Log(R^T R_c) + KOmega(omega_r - omega) + alpha_r
+tau_c = tau_0 + J(alpha_c - alpha_0)
 ```
 
-`R_c` is constructed from the desired thrust direction and reference yaw.
-The Sun method produces `omega_r` and `alpha_r` from reference jerk and snap,
-the current attitude and angular velocity, and thrust.
+The desired attitude is constructed from the commanded thrust direction and
+reference heading. Reference angular velocity and acceleration are generated
+from higher-order trajectory derivatives using the Sun method.
 
-### Acceleration INDI signal path
+### Translational INDI
 
-```text
-VehicleLocalPosition.ax/ay/az
-  -> ROS 2-pole LPF(indi_acceleration_cutoff_hz)
-  -> a_0
+- `a_0` is obtained from `VehicleLocalPosition` and processed by a ROS two-pole
+  low-pass filter.
+- `F_0` is obtained from `AllocationValue.allocated_force`. PX4 has already
+  applied `CA_FORCE_CUTOFF`, so ROS does not filter it again.
+- `indi_acceleration_cutoff_hz` sets the acceleration-feedback cutoff.
+- `indi_force_delay_s` selects or interpolates `F_0` on the PX4 HRT time base.
 
-PX4 final actuator setpoint x effectiveness matrix
-  -> PX4 2-pole LPF(CA_FORCE_CUTOFF)
-  -> AllocationValue.allocated_force
-  -> FRD-to-NED conversion using attitude at each AllocationValue event
-  -> PX4-timestamped history/interpolation(indi_force_delay_s)
-  -> F_0
-
-F_c = F_0 - mass * (a_c - a_0)
-```
-
-The ROS implementation uses sources corresponding to PX4
-`MPC_INDI_A_SRC=1` and `MPC_INDI_F_SRC=0`. `allocated_force` has already passed
-through `CA_FORCE_CUTOFF` in PX4, so ROS does not filter it again.
-
-`VehicleLocalPosition.timestamp_sample` and `AllocationValue.timestamp` use the
-same PX4 HRT microsecond clock. ROS selects or interpolates `F_0` from force
-history at the acceleration sample time minus `indi_force_delay_s`. ROS receipt
-time is not used for this alignment. A zero delay adds no configured offset.
-
-### Rate INDI signal path
-
-```text
-VehicleAngularVelocity.xyz
-  -> omega_0
-
-VehicleAngularVelocity.xyz_derivative
-  -> alpha_0
-
-PX4 final actuator setpoint x effectiveness matrix
-  -> PX4 2-pole LPF(CA_TORQ_CUTOFF)
-  -> AllocationValue.allocated_torque
-  -> tau_0
-
-tau_c = tau_0 + J * (alpha_c - alpha_0)
-```
-
-ROS uses the PX4 angular velocity, angular acceleration, and allocated torque
-directly. It adds no rate-feedback filter, delay, or timestamp pairing. PX4
-determines the bandwidth of these feedback signals:
-
-| Signal | PX4 processing | ROS processing |
-|---|---|---|
-| `omega_0` | `IMU_GYRO_CUTOFF` and notch filters | Direct use |
-| `alpha_0` | `IMU_DGYRO_CUTOFF` | Direct use |
-| `tau_0` | `CA_TORQ_CUTOFF` | Direct use |
-| `F_0` | `CA_FORCE_CUTOFF` | Frame conversion and history interpolation |
-| `a_0` | No ROS-side INDI preprocessing | 2-pole `indi_acceleration_cutoff_hz` LPF |
-
-The current PX4 configuration uses:
-
-```text
-IMU_GYRO_CUTOFF=125
-IMU_DGYRO_CUTOFF=10
-CA_TORQ_CUTOFF=8
-CA_FORCE_CUTOFF=8
-```
-
-The corresponding acceleration INDI configuration in ROS is:
+`VehicleLocalPosition.timestamp_sample` and `AllocationValue.timestamp` share
+the PX4 HRT clock, so force-delay compensation does not use ROS receipt time.
+The defaults are:
 
 ```yaml
 indi_acceleration_cutoff_hz: 8.0
 indi_force_delay_s: 0.0
 ```
 
-### Startup and switches
+### Rotational INDI
 
-`indi_rate_enabled` and `indi_acceleration_enabled` are independent:
+- `omega` uses `VehicleAngularVelocity.xyz` directly.
+- `alpha_0` uses `VehicleAngularVelocity.xyz_derivative` directly.
+- `tau_0` uses `AllocationValue.allocated_torque` directly.
 
-| Rate INDI | Acceleration INDI | Mode 5 behavior |
-|---|---|---|
-| Off | Off | Sun reference path, direct force, direct torque |
-| On | Off | Direct force and rate INDI |
-| Off | On | Acceleration INDI and direct torque |
-| On | On | Complete Geometric INDI |
+ROS adds no rotational-feedback filter or delay. Feedback bandwidth is
+determined by PX4 `IMU_GYRO_CUTOFF`, `IMU_DGYRO_CUTOFF`, and
+`CA_TORQ_CUTOFF`.
 
-Before the first finite `AllocationValue` arrives, the controller uses direct
-computation to establish an initial wrench. The enabled incremental laws engage
-after feedback becomes available. No fixed feedback-age threshold is applied.
+### INDI switches and initialization
 
-### PCA torque decomposition
+`indi_acceleration_enabled` and `indi_rate_enabled` are independent. Disabling
+one replaces the corresponding incremental law with direct model inversion.
+Before the first valid `AllocationValue`, the controller computes an initial
+thrust and moment directly; enabled INDI loops engage once allocation feedback
+is established.
 
-With rate INDI enabled, ROS publishes the total torque and the PX4-compatible
-INDI feedback component:
+### PCA moment prioritization
 
-```text
-tau_feedback = tau_0 - J * alpha_0
-tau_c = J * alpha_c + tau_feedback
-
-VehicleTorqueSetpoint.xyz = normalized(tau_c)
-VehicleTorqueSetpoint.xyz_indi_feedback = normalized(tau_feedback)
-VehicleTorqueSetpoint.xyz_indi_feedback_valid = true
-```
-
-Both components use the same torque normalization and final clipping ratio.
-ROS preserves the decomposition but does not enable PCA. PX4 decides whether to
-consume it from the airframe, allocation matrices, and `CA_METHOD`: the df4 PCA
-path can use the priority component, while the iris WLS path ignores it and uses
-the total torque.
-
-## Wrench normalization
-
-ROS controllers first compute a physical wrench, then convert it to the
-dimensionless setpoints accepted by the PX4 allocator:
+With rotational INDI enabled, ROS publishes both the total moment and the INDI
+feedback component:
 
 ```text
-T_normalized = normalizedthrust_constant * T / mass
-tau_normalized = diag(normalizedtorque_constant_r,
-                      normalizedtorque_constant_p,
-                      normalizedtorque_constant_y) * tau
+tau_feedback = tau_0 - J alpha_0
+tau_c = J alpha_c + tau_feedback
 ```
 
-The parameters correspond to PX4 allocation scales as follows:
+ROS preserves and transmits this decomposition but does not enable PCA. PX4
+selects its use from the airframe, allocation matrices, and `CA_METHOD`. The df4
+PCA configuration can consume the priority component; the iris WLS
+configuration uses only the total moment.
+
+## Command normalization
+
+Collective thrust and body moments are normalized before publication to PX4:
+
+```text
+T_n = normalizedthrust_constant * T / mass
+tau_n = diag(normalizedtorque_constant_r,
+             normalizedtorque_constant_p,
+             normalizedtorque_constant_y) tau
+```
+
+with
 
 ```text
 normalizedthrust_constant = mass / T_max = MPC_THR_HOVER / g
-normalizedtorque_constant_* = AllocationValue.torque_setpoint_scale[*]
 ```
 
-Current iris values are stored in
-[config/vehicles/iris.yaml](config/vehicles/iris.yaml). Vehicle mass, inertia,
-and thrust/torque normalization constants must be updated together when changing
-airframes.
+The iris mass, inertia, and normalization parameters are stored in
+[config/vehicles/iris.yaml](config/vehicles/iris.yaml). These parameters must
+remain consistent with the PX4 allocation model when changing airframes.
 
-## Control rates and DDS
+## Reference trajectories and control rates
 
-ROS wrench control is feedback-driven:
+The package includes horizontal and vertical figure eights, helical flips,
+a sinusoidal flip, and a circular trajectory. References provide position,
+velocity, acceleration, jerk, snap, and heading derivatives and can be modified
+from the tuning panel or through ROS parameters.
 
-- each new `VehicleAngularVelocity` runs rate control and publishes a wrench;
-- each new `VehicleLocalPosition` updates acceleration INDI;
-- the latest desired thrust vector is held between position-state updates;
-- attitude and `AllocationValue` update their caches at their source rates.
+Control execution is driven by PX4 feedback. `VehicleAngularVelocity` triggers
+rotational control and command publication; `VehicleLocalPosition` triggers the
+translational INDI update. The resulting control rates follow the actual state
+feedback rates rather than separate rate parameters. Read measured rates with:
 
-`offboard.setpoint_rate_hz` refreshes trajectory references, previews, and PX4
-setpoints for mode 6. It is not the ROS wrench-control rate. Measured rates are
-available in the tuning panel and status topic.
-
-PX4 DDS should publish the controller feedback topics at their source rates:
-
-```yaml
-- topic: /fmu/out/vehicle_angular_velocity
-  type: px4_msgs::msg::VehicleAngularVelocity
-  rate_limit: unlimited
-- topic: /fmu/out/vehicle_attitude
-  type: px4_msgs::msg::VehicleAttitude
-  rate_limit: unlimited
-- topic: /fmu/out/vehicle_local_position
-  type: px4_msgs::msg::VehicleLocalPosition
-  rate_limit: unlimited
-- topic: /fmu/out/allocation_value
-  type: px4_msgs::msg::AllocationValue
+```bash
+ros2 topic echo /controller/control_rate_status --once
 ```
 
-## Trajectories
-
-`ReferenceTrajectory` supplies position, velocity, acceleration, jerk, snap,
-and yaw derivatives. Available configured trajectories include:
-
-- `figure8_horizontal`
-- `figure8_vertical`
-- `helix_flip`
-- `helix_flip_y`
-- `flip_loop_sine`
-- `fast_circle`
-
-Set the trajectory with `trajName` and its phase rate with `omega_value`. The
-takeoff sequence first reaches the periodic trajectory start, then enters the
-periodic motion. With `trajectory_yaw_lock=true`, `trajectory_yaw_fixed` is used
-and yaw rate and acceleration are zero; the Sun mapping still generates roll
-and pitch reference derivatives.
+PX4 DDS should publish `vehicle_angular_velocity`, `vehicle_attitude`,
+`vehicle_local_position`, and `allocation_value` at their source rates.
 
 ## Installation
 
@@ -274,8 +164,8 @@ make px4_sitl
 
 ### px4_msgs
 
-The project requires `AllocationValue` and the extended
-`VehicleTorqueSetpoint`:
+The project uses extended `AllocationValue` and `VehicleTorqueSetpoint`
+messages:
 
 ```bash
 cd ~/ws_sensor_combined/src
@@ -286,7 +176,7 @@ git -C px4_msgs apply \
   ../geometric_controller/patches/px4_msgs-release-1.18.patch
 ```
 
-The message field order and types must match PX4 `df-main`.
+Message fields and ordering must match PX4 `df-main`.
 
 ### Build
 
@@ -303,9 +193,6 @@ Two launch methods are supported.
 
 ### Method 1: one-command launch
 
-Start PX4 SITL, Micro XRCE-DDS Agent, the controller node, RViz, and the tuning
-panel with one launch command:
-
 ```bash
 cd ~/ws_sensor_combined
 source /opt/ros/jazzy/setup.bash
@@ -313,9 +200,12 @@ source install/setup.bash
 ros2 launch geometric_controller sitl_geometric_controller.launch.py
 ```
 
+This starts PX4 SITL, Micro XRCE-DDS Agent, the controller, RViz, and the tuning
+panel.
+
 ### Method 2: three terminals
 
-Terminal 1, start PX4 SITL and `gz_iris`:
+Terminal 1, start PX4 SITL:
 
 ```bash
 cd ~/PX4-Autopilot
@@ -328,7 +218,7 @@ Terminal 2, start Micro XRCE-DDS Agent:
 MicroXRCEAgent udp4 -p 8888
 ```
 
-Terminal 3, start the controller node, RViz, and the tuning panel:
+Terminal 3, start this package:
 
 ```bash
 cd ~/ws_sensor_combined
@@ -337,36 +227,44 @@ source install/setup.bash
 ros2 launch geometric_controller geometric_controller.launch.py
 ```
 
-## Configuration and runtime control
-
-Primary configuration files:
+## Configuration
 
 - [config/controller.yaml](config/controller.yaml): controller, INDI,
-  trajectory, Offboard, PX4 topic, and visualization parameters;
-- [config/vehicles/iris.yaml](config/vehicles/iris.yaml): vehicle mass,
-  inertia, and normalization constants.
+  trajectory, Offboard, and visualization parameters;
+- [config/vehicles/iris.yaml](config/vehicles/iris.yaml): vehicle dynamics and
+  command-normalization parameters.
 
-Common runtime changes:
+Controllers, trajectories, and INDI switches can be changed from the tuning
+panel or with ROS parameters:
 
 ```bash
 ros2 param set /trajectory_offboard_node controller_type 5
 ros2 param set /trajectory_offboard_node indi_rate_enabled true
 ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
-ros2 param set /trajectory_offboard_node omega_value 0.5
 ```
 
-The tuning panel controls trajectories, controller selection, INDI switches,
-`Kp/Kv/KR/KOmega`, mass, inertia, and wrench normalization. It also displays
-measured state-feedback and control-callback rates.
+## Reference implementations and literature
 
-Read the control-rate status with:
+1. C. Meng, [`UAV_Algorithm_Benchmark: main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
+   open-source MATLAB flight-control benchmark.
+2. T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a
+   Quadrotor UAV on SE(3),” *49th IEEE Conference on Decision and Control*,
+   pp. 5420–5425, 2010. [doi:10.1109/CDC.2010.5717652](https://doi.org/10.1109/CDC.2010.5717652)
+3. J. C. Johnson and R. W. Beard, “Globally-Attractive Logarithmic Geometric
+   Control of a Quadrotor for Aggressive Trajectory Tracking,” *IEEE Control
+   Systems Letters*, 2022.
+   [doi:10.1109/LCSYS.2022.3141066](https://doi.org/10.1109/LCSYS.2022.3141066)
+4. S. Sun, A. Romero, P. Foehn, E. Kaufmann, and D. Scaramuzza, “A Comparative
+   Study of Nonlinear MPC and Differential-Flatness-Based Control for Quadrotor
+   Agile Flight,” *IEEE Transactions on Robotics*, vol. 38, pp. 3357–3373,
+   2022. [doi:10.1109/TRO.2022.3177279](https://doi.org/10.1109/TRO.2022.3177279)
+5. E. Tal and S. Karaman, “Accurate Tracking of Aggressive Quadrotor
+   Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential
+   Flatness,” *IEEE Transactions on Control Systems Technology*, vol. 29,
+   no. 3, pp. 1203–1218, 2021.
+   [doi:10.1109/TCST.2020.3001117](https://doi.org/10.1109/TCST.2020.3001117)
+6. L. Meier and The PX4 Contributors, [`PX4 Autopilot`](https://github.com/PX4/PX4-Autopilot),
+   Zenodo. [doi:10.5281/zenodo.595432](https://doi.org/10.5281/zenodo.595432)
 
-```bash
-ros2 topic echo /controller/control_rate_status --once
-```
-
-## References
-
-- [UAV_Algorithm_Benchmark / main.m](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
-- [DuctedFanUAV-Autopilot df-main](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main)
-- [PX4 ROS 2 Offboard Control](https://docs.px4.io/main/en/ros2/offboard_control)
+The PX4 firmware implementation used by this project is
+[`DuctedFanUAV-Autopilot: df-main`](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main).
