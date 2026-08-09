@@ -416,7 +416,7 @@ ControllerCommand MainGeometricINDIController::update(
 
   const bool use_acceleration_indi = params.indi_acceleration_enabled;
   if (use_acceleration_indi) {
-    // main.tex Eq. (55), using the PX4 MPC_INDI_A_SRC=1 acceleration and
+    // Acceleration INDI using the PX4 MPC_INDI_A_SRC=1 acceleration and
     // MPC_INDI_F_SRC=0 physical allocation feedback supplied in VehicleState.
     // PX4 mc_pos_control is scheduled by VehicleLocalPosition. Mirror that
     // sampling exactly: update the incremental force once for each new a_0/F_0
@@ -430,7 +430,7 @@ ControllerCommand MainGeometricINDIController::update(
       last_acceleration_sample_timestamp_ = state.acceleration_sample_timestamp;
     }
   } else {
-    // Bypass Eq. (55) with direct force inversion. The attitude/rate reference
+    // Bypass the incremental law with direct force inversion. The attitude/rate reference
     // remains geometric_indi's Sun path rather than main_geometric's separate
     // closed-loop derivative construction.
     commanded_body_z_force_ = direct_body_z_force;
@@ -459,7 +459,7 @@ ControllerCommand MainGeometricINDIController::update(
   Eigen::Vector3d torque;
   Eigen::Vector3d indi_torque_feedback = Eigen::Vector3d::Zero();
   if (params.indi_rate_enabled) {
-    // main.tex Eq. (60), identical to the proven PX4 rate-INDI structure:
+    // Rate INDI, identical to the PX4 structure:
     // tau_c = tau_0 + J (alpha_c - alpha_0). AllocationValue.allocated_torque
     // is supplied directly as tau_0 in physical N*m.
     // Preserve PX4's PCA decomposition: tau_feedback = tau_0 - J*alpha_0 is

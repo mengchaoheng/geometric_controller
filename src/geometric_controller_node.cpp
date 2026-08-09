@@ -406,11 +406,11 @@ private:
     declare_parameter<bool>(
       "indi_rate_enabled", true,
       describeParameter(
-        "Enable main.tex/PX4-style rotational INDI in main_geometric_indi."));
+        "Enable rotational INDI in main_geometric_indi."));
     declare_parameter<bool>(
       "indi_acceleration_enabled", true,
       describeParameter(
-        "Enable main.tex/PX4-style acceleration INDI in main_geometric_indi."));
+        "Enable acceleration INDI in main_geometric_indi."));
     declare_parameter<double>(
       "indi_acceleration_cutoff_hz", 8.0,
       describeDouble(
@@ -1727,7 +1727,7 @@ private:
     if (alignedAllocationForceFeedbackValid()) {
       // PX4 MPC_INDI_F_SRC=0, aligned to the same VehicleLocalPosition
       // timestamp_sample as a_0. The cached vector already uses the paper's
-      // positive T*b_z convention in NED; mass enters Eq. (55) itself.
+      // positive T*b_z convention in NED; mass enters the incremental law.
       state.applied_thrust_axis_force = aligned_thrust_axis_force_ned_;
     }
     const auto & allocation = allocation_value_;
@@ -2223,7 +2223,8 @@ private:
     // Mirror PX4 updateAllocatedForceHistory(): rotate every allocation
     // sample with the attitude available at that allocation event, then keep
     // the inertial-frame force in the timestamped history. AllocationValue is
-    // body FRD F=-T*b_z; negate once for main.tex's positive T*b_z convention.
+    // Body FRD uses F=-T*b_z; negate once for the controller's positive
+    // T*b_z convention.
     sample.thrust_axis_force_ned = -attitude.toRotationMatrix() * force_body;
     if (!allocation_force_history_.empty() &&
       sample.timestamp <= allocation_force_history_.back().timestamp)
