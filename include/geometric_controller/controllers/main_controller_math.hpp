@@ -52,6 +52,7 @@ struct SunReferenceRates
 Eigen::Matrix3d hat(const Eigen::Vector3d & w);
 Eigen::Vector3d vee(const Eigen::Matrix3d & S);
 Eigen::Vector3d logSO3(const Eigen::Matrix3d & R);
+Eigen::Vector3d canonicalQuaternionImaginaryError(const Eigen::Vector4d & quaternion);
 Eigen::Vector3d johnsonLogSO3(const Eigen::Matrix3d & R);
 Eigen::Matrix3d johnsonLeftJacobianSO3(const Eigen::Vector3d & phi);
 Eigen::Vector3d leeSO3Error(const Eigen::Matrix3d & R, const Eigen::Matrix3d & Rd);

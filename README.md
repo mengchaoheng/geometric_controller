@@ -8,33 +8,40 @@ incremental nonlinear dynamic inversion (INDI), and PX4 Offboard operation.
 ROS computes collective thrust and body-moment commands; PX4 performs control
 allocation and actuator output.
 
-The controller structure and reference trajectories follow the public
-[`main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
-implementation.
+The controller structure and reference trajectories follow the open-source
+[`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
+project.
 
 ## Controllers
 
 The package provides:
 
-1. `main_geometric` [[1]](#reference-implementations-and-literature)
+1. `main_geometric` [[1, 3]](#reference-implementations-and-literature)
 2. `main_lee` [[2]](#reference-implementations-and-literature)
 3. `main_johnson` [[3]](#reference-implementations-and-literature)
 4. `main_sun_dfbc` [[4]](#reference-implementations-and-literature)
-5. `main_geometric_indi` [[1, 4, 5]](#reference-implementations-and-literature)
+5. `main_geometric_indi` [[1, 3, 4, 5]](#reference-implementations-and-literature)
 6. `px4_direct` [[6]](#reference-implementations-and-literature)
 
 For `main_geometric_indi`, [1] defines the specific implementation, [4]
 supports its angular-reference construction, and [5] provides the INDI and
 differential-flatness control basis.
+Controllers using the SO(3) Log attitude error adopt the full-angle definition
+from [3]. Its numerical evaluation uses the canonical-quaternion principal
+branch implemented by PX4 `AttitudeControl` [6], with [7, 8] supporting the
+small-angle and near-180-degree treatment. `main_sun_dfbc` retains the
+tilt-prioritized structure of [4] and uses the same canonical-quaternion
+fallback at the antiparallel-thrust-axis singularity.
 
 Modes 1–5 perform trajectory, attitude, and angular-rate control in ROS and
 publish collective-thrust and body-moment commands to PX4. PX4 retains control
 allocation and actuator output. `px4_direct` publishes position references and
 uses the built-in PX4 controller cascade.
 
-The default is `main_geometric_indi`, with translational and rotational INDI
-enabled. `main_geometric` corresponds to `controllerPDGeometric` in the public
-MATLAB implementation, while `main_geometric_indi` corresponds to
+The default is `main_geometric_indi`, with outer-loop acceleration INDI and
+inner-loop angular-acceleration INDI enabled. `main_geometric` corresponds to
+`geometric_pd / controllerGeometricPD` in the open-source MATLAB
+implementation, while `main_geometric_indi` corresponds to
 `controllerGeometricINDI`. They use different desired-attitude derivative
 constructions. Disabling an INDI switch in mode 5 bypasses only the associated
 incremental law and preserves its reference-attitude and angular-motion
@@ -42,7 +49,8 @@ generation method.
 
 ## Geometric INDI
 
-Geometric INDI consists of translational and rotational incremental loops:
+Geometric INDI consists of an outer-loop acceleration INDI and an inner-loop
+angular-acceleration INDI:
 
 ```text
 a_c = a_r + Kp(p_r - p) + Kv(v_r - v)
@@ -56,7 +64,7 @@ The desired attitude is constructed from the commanded thrust direction and
 reference heading. Reference angular velocity and acceleration are generated
 from higher-order trajectory derivatives using the Sun method.
 
-### Translational INDI
+### Outer-loop acceleration INDI
 
 - `a_0` is obtained from `VehicleLocalPosition` and processed by a ROS two-pole
   low-pass filter.
@@ -74,13 +82,13 @@ indi_acceleration_cutoff_hz: 8.0
 indi_force_delay_s: 0.0
 ```
 
-### Rotational INDI
+### Inner-loop angular-acceleration INDI
 
 - `omega` uses `VehicleAngularVelocity.xyz` directly.
 - `alpha_0` uses `VehicleAngularVelocity.xyz_derivative` directly.
 - `tau_0` uses `AllocationValue.allocated_torque` directly.
 
-ROS adds no rotational-feedback filter or delay. Feedback bandwidth is
+ROS adds no inner-loop angular-feedback filter or delay. Feedback bandwidth is
 determined by PX4 `IMU_GYRO_CUTOFF`, `IMU_DGYRO_CUTOFF`, and
 `CA_TORQ_CUTOFF`.
 
@@ -94,7 +102,7 @@ is established.
 
 ### PCA moment prioritization
 
-With rotational INDI enabled, ROS publishes both the total moment and the INDI
+With inner-loop angular-acceleration INDI enabled, ROS publishes both the total moment and the INDI
 feedback component:
 
 ```text
@@ -136,8 +144,8 @@ velocity, acceleration, jerk, snap, and heading derivatives and can be modified
 from the tuning panel or through ROS parameters.
 
 Control execution is driven by PX4 feedback. `VehicleAngularVelocity` triggers
-rotational control and command publication; `VehicleLocalPosition` triggers the
-translational INDI update. The resulting control rates follow the actual state
+inner-loop control and command publication; `VehicleLocalPosition` triggers the
+outer-loop acceleration INDI update. The resulting control rates follow the actual state
 feedback rates rather than separate rate parameters. Read measured rates with:
 
 ```bash
@@ -245,8 +253,8 @@ ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
 
 ## Reference implementations and literature
 
-1. C. Meng, [`UAV_Algorithm_Benchmark: main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
-   open-source MATLAB flight-control benchmark.
+1. C. Meng, [`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
+   open-source flight-control project.
 2. T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a
    Quadrotor UAV on SE(3),” *49th IEEE Conference on Decision and Control*,
    pp. 5420–5425, 2010. [doi:10.1109/CDC.2010.5717652](https://doi.org/10.1109/CDC.2010.5717652)
@@ -265,6 +273,10 @@ ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
    [doi:10.1109/TCST.2020.3001117](https://doi.org/10.1109/TCST.2020.3001117)
 6. L. Meier and The PX4 Contributors, [`PX4 Autopilot`](https://github.com/PX4/PX4-Autopilot),
    Zenodo. [doi:10.5281/zenodo.595432](https://doi.org/10.5281/zenodo.595432)
+7. J. Solà, “Quaternion Kinematics for the Error-State Kalman Filter,” 2017.
+   [doi:10.48550/arXiv.1711.02508](https://doi.org/10.48550/arXiv.1711.02508)
+8. Z. Nurlanov, “Exploring SO(3) Logarithmic Map: Degeneracies and
+   Derivatives,” 2021. [PDF](https://nurlanov.me/static/uploads/nurlanov2021so3log.pdf)
 
 The PX4 firmware implementation used by this project is
 [`DuctedFanUAV-Autopilot: df-main`](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main).

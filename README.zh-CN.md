@@ -6,36 +6,40 @@
 用于解析参考轨迹生成、几何控制、增量非线性动态逆（INDI）以及 PX4 Offboard
 飞行。ROS 侧计算总推力与机体系控制力矩，PX4 负责控制分配和执行器驱动。
 
-算法结构与参考轨迹实现主要参照公开的
-[`main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)。
+算法结构与参考轨迹实现主要参照开源项目
+[`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)。
 
 ## 控制器
 
 项目提供以下控制器：
 
-1. `main_geometric` [[1]](#参考实现与文献)
+1. `main_geometric` [[1, 3]](#参考实现与文献)
 2. `main_lee` [[2]](#参考实现与文献)
 3. `main_johnson` [[3]](#参考实现与文献)
 4. `main_sun_dfbc` [[4]](#参考实现与文献)
-5. `main_geometric_indi` [[1, 4, 5]](#参考实现与文献)
+5. `main_geometric_indi` [[1, 3, 4, 5]](#参考实现与文献)
 6. `px4_direct` [[6]](#参考实现与文献)
 
 其中 `main_geometric_indi` 的具体实现以 [1] 为准；[4] 对应其参考角运动生成方法，
 [5] 对应 INDI 与微分平坦性控制基础。
+采用 SO(3) Log 姿态误差的控制器使用 [3] 的全角度误差定义；其数值计算采用
+PX4 `AttitudeControl` [6] 的规范四元数主值实现，并参考 [7, 8] 处理小角度和
+接近 180°的情形。`main_sun_dfbc` 保持 [4] 的倾斜优先误差结构，在推力轴反平行
+奇异点采用相同的规范四元数回退。
 
 模式 1–5 在 ROS 中完成轨迹跟踪、姿态与角速度控制，并向 PX4 发布总推力和
 机体系控制力矩指令；PX4 保留控制分配与执行器输出。`px4_direct` 发布位置轨迹
 指令并使用 PX4 内置串级控制器。
 
-默认控制器为 `main_geometric_indi`，其平动 INDI 与转动 INDI 默认开启。
-`main_geometric` 对应公开 MATLAB 实现中的 `controllerPDGeometric`，
+默认控制器为 `main_geometric_indi`，其外环加速度 INDI 与内环角加速度 INDI 默认开启。
+`main_geometric` 对应开源项目中的 `geometric_pd / controllerGeometricPD`，
 `main_geometric_indi` 对应 `controllerGeometricINDI`。两者采用不同的期望姿态
 导数构造方法；关闭模式 5 的 INDI 开关仅旁路相应增量控制律，不改变其参考姿态
 与参考角运动生成方法。
 
 ## Geometric INDI
 
-Geometric INDI 由平动与转动两个增量控制环组成：
+Geometric INDI 由外环加速度 INDI 与内环角加速度 INDI 两个增量控制环组成：
 
 ```text
 a_c = a_r + Kp(p_r - p) + Kv(v_r - v)
@@ -48,7 +52,7 @@ tau_c = tau_0 + J(alpha_c - alpha_0)
 期望姿态由期望推力方向与参考航向构造；参考角速度和角加速度由参考轨迹的
 高阶导数通过 Sun 方法计算。
 
-### 平动 INDI
+### 外环加速度 INDI
 
 - `a_0`：来自 `VehicleLocalPosition` 的加速度，经 ROS 二阶低通滤波器处理；
 - `F_0`：来自 PX4 `AllocationValue.allocated_force`；该信号已在 PX4 中经过
@@ -64,13 +68,13 @@ indi_acceleration_cutoff_hz: 8.0
 indi_force_delay_s: 0.0
 ```
 
-### 转动 INDI
+### 内环角加速度 INDI
 
 - `omega`：直接使用 `VehicleAngularVelocity.xyz`；
 - `alpha_0`：直接使用 `VehicleAngularVelocity.xyz_derivative`；
 - `tau_0`：直接使用 `AllocationValue.allocated_torque`。
 
-转动 INDI 不在 ROS 中附加滤波或延迟。角速度、角加速度和已分配力矩的带宽
+内环角加速度 INDI 不在 ROS 中附加滤波或延迟。角速度、角加速度和已分配力矩的带宽
 分别由 PX4 的 `IMU_GYRO_CUTOFF`、`IMU_DGYRO_CUTOFF` 和
 `CA_TORQ_CUTOFF` 决定。
 
@@ -82,7 +86,7 @@ indi_force_delay_s: 0.0
 
 ### PCA 力矩优先级
 
-启用转动 INDI 时，ROS 同时发送总力矩和 INDI 反馈分量：
+启用内环角加速度 INDI 时，ROS 同时发送总力矩和 INDI 反馈分量：
 
 ```text
 tau_feedback = tau_0 - J alpha_0
@@ -119,8 +123,8 @@ iris 的质量、惯量与归一化参数位于
 项目提供水平八字、垂直八字、螺旋翻转、正弦翻转和圆轨迹。参考轨迹包含位置、
 速度、加速度、jerk、snap 以及航向导数，可通过调参面板或 ROS 参数修改。
 
-控制计算由 PX4 状态反馈驱动：`VehicleAngularVelocity` 触发转动控制与指令发布，
-`VehicleLocalPosition` 触发平动 INDI 更新。因此控制频率由实际状态反馈频率决定，
+控制计算由 PX4 状态反馈驱动：`VehicleAngularVelocity` 触发内环控制与指令发布，
+`VehicleLocalPosition` 触发外环加速度 INDI 更新。因此控制频率由实际状态反馈频率决定，
 不是独立调参量。可通过以下话题查看实测频率：
 
 ```bash
@@ -225,8 +229,8 @@ ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
 
 ## 参考实现与文献
 
-1. C. Meng, [`UAV_Algorithm_Benchmark: main.m`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
-   开源 MATLAB 飞行控制算法基准。
+1. C. Meng, [`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark),
+   开源飞行控制算法项目。
 2. T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a
    Quadrotor UAV on SE(3),” *49th IEEE Conference on Decision and Control*,
    pp. 5420–5425, 2010. [doi:10.1109/CDC.2010.5717652](https://doi.org/10.1109/CDC.2010.5717652)
@@ -245,6 +249,10 @@ ros2 param set /trajectory_offboard_node indi_acceleration_enabled true
    [doi:10.1109/TCST.2020.3001117](https://doi.org/10.1109/TCST.2020.3001117)
 6. L. Meier and The PX4 Contributors, [`PX4 Autopilot`](https://github.com/PX4/PX4-Autopilot),
    Zenodo. [doi:10.5281/zenodo.595432](https://doi.org/10.5281/zenodo.595432)
+7. J. Solà, “Quaternion Kinematics for the Error-State Kalman Filter,” 2017.
+   [doi:10.48550/arXiv.1711.02508](https://doi.org/10.48550/arXiv.1711.02508)
+8. Z. Nurlanov, “Exploring SO(3) Logarithmic Map: Degeneracies and
+   Derivatives,” 2021. [PDF](https://nurlanov.me/static/uploads/nurlanov2021so3log.pdf)
 
 本项目使用的 PX4 固件实现为
 [`DuctedFanUAV-Autopilot: df-main`](https://github.com/mengchaoheng/DuctedFanUAV-Autopilot/tree/df-main)。

@@ -14,6 +14,9 @@
 
 #include "geometric_controller/controllers/main_controller_math.hpp"
 
+#include <Eigen/Geometry>
+#include <Eigen/SVD>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -22,6 +25,66 @@ namespace geometric_controller
 {
 namespace main_math
 {
+namespace
+{
+
+Eigen::Matrix3d projectSO3(const Eigen::Matrix3d & matrix)
+{
+  const Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+    matrix, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  const Eigen::Matrix3d u = svd.matrixU();
+  const Eigen::Matrix3d v = svd.matrixV();
+  Eigen::Vector3d orientation(1.0, 1.0, (u * v.transpose()).determinant());
+  return u * orientation.asDiagonal() * v.transpose();
+}
+
+Eigen::Vector4d canonicalQuaternionCoefficients(Eigen::Quaterniond quaternion)
+{
+  quaternion.normalize();
+  Eigen::Vector4d coefficients(
+    quaternion.w(), quaternion.x(), quaternion.y(), quaternion.z());
+
+  // Match PX4 Quaternion::canonical(): q and -q encode the same rotation.
+  // The first significant component also fixes the axis sign at theta=pi.
+  constexpr double canonical_epsilon = std::numeric_limits<float>::epsilon();
+  for (int index = 0; index < coefficients.size(); ++index) {
+    if (std::abs(coefficients[index]) > canonical_epsilon) {
+      if (coefficients[index] < 0.0) {
+        coefficients = -coefficients;
+      }
+      break;
+    }
+  }
+
+  return coefficients;
+}
+
+Eigen::Vector3d quaternionPrincipalLog(const Eigen::Quaterniond & quaternion)
+{
+  const Eigen::Vector4d coefficients = canonicalQuaternionCoefficients(quaternion);
+
+  const double scalar = std::clamp(coefficients[0], 0.0, 1.0);
+  const Eigen::Vector3d vector = coefficients.tail<3>();
+  const double vector_norm_squared = vector.squaredNorm();
+
+  if (vector_norm_squared < 1e-12) {
+    if (scalar > 1e-6) {
+      const double scalar_squared = scalar * scalar;
+      const double coefficient = 2.0 / scalar -
+        (2.0 / 3.0) * vector_norm_squared /
+        (scalar * scalar_squared);
+      return coefficient * vector;
+    }
+
+    return 2.0 * vector;
+  }
+
+  const double vector_norm = std::sqrt(vector_norm_squared);
+  const double angle = 2.0 * std::atan2(vector_norm, scalar);
+  return (angle / vector_norm) * vector;
+}
+
+}  // namespace
 
 Eigen::Matrix3d hat(const Eigen::Vector3d & w)
 {
@@ -37,43 +100,24 @@ Eigen::Vector3d vee(const Eigen::Matrix3d & S)
 
 Eigen::Vector3d logSO3(const Eigen::Matrix3d & R)
 {
-  const double cos_angle = std::max(-1.0, std::min(1.0, 0.5 * (R.trace() - 1.0)));
-  const double angle = std::acos(cos_angle);
-  const Eigen::Vector3d v = vee(0.5 * (R - R.transpose()));
-  if (angle < 1e-6) {
-    return v;
-  }
-  const double sin_angle = std::sin(angle);
-  if (std::abs(sin_angle) < 1e-6) {
-    return v;
-  }
-  return angle / sin_angle * v;
+  // Principal SO(3) Log through a canonical unit quaternion. This matches
+  // UAV_Algorithm_Benchmark::LogSO3 and PX4 AttitudeControl::logMapSO3,
+  // including the small-angle limit and deterministic theta=pi axis sign.
+  return quaternionPrincipalLog(Eigen::Quaterniond(projectSO3(R)));
+}
+
+Eigen::Vector3d canonicalQuaternionImaginaryError(const Eigen::Vector4d & quaternion)
+{
+  const Eigen::Quaterniond q(
+    quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+  return 2.0 * canonicalQuaternionCoefficients(q).tail<3>();
 }
 
 Eigen::Vector3d johnsonLogSO3(const Eigen::Matrix3d & R)
 {
-  const double cos_angle = std::max(-1.0, std::min(1.0, 0.5 * (R.trace() - 1.0)));
-  const double angle = std::acos(cos_angle);
-
-  if (std::abs(std::abs(angle) - M_PI) < 1e-6) {
-    Eigen::EigenSolver<Eigen::Matrix3d> solver(R);
-    int axis_index = 0;
-    double min_distance_to_one = std::numeric_limits<double>::max();
-    for (int i = 0; i < 3; ++i) {
-      const double distance_to_one = std::abs(solver.eigenvalues()(i).real() - 1.0) +
-                                     std::abs(solver.eigenvalues()(i).imag());
-      if (distance_to_one < min_distance_to_one) {
-            min_distance_to_one = distance_to_one;
-            axis_index = i;
-      }
-    }
-
-    const Eigen::Vector3d axis = solver.eigenvectors().col(axis_index).real();
-    if (axis.norm() > 1e-9 && axis.allFinite()) {
-      return angle * axis.normalized();
-    }
-  }
-
+  // Preserve Johnson's full-angle Log error while using the canonical
+  // principal branch from PX4 AttitudeControl at theta=pi. Eigenvectors do
+  // not provide a deterministic axis sign at the repeated pi branch.
   return logSO3(R);
 }
 

@@ -29,6 +29,7 @@ namespace
 {
 
 constexpr double kEpsilon = 1e-8;
+constexpr double kReducedAttitudeSingularityEpsilon = 1e-6;
 
 struct DesiredAttitudeKinematics
 {
@@ -207,14 +208,25 @@ Eigen::Vector3d sunAngularAcceleration(
   q_error.normalize();
   const double denominator =
     std::sqrt(q_error[0] * q_error[0] + q_error[3] * q_error[3]);
+  Eigen::Vector3d feedback;
+  if (denominator < kReducedAttitudeSingularityEpsilon) {
+    // The reduced-attitude/yaw decomposition is undefined when the current
+    // and desired thrust axes are antiparallel. Match PX4 AttitudeControl's
+    // corrected branch by using the canonical full-quaternion error. At this
+    // singularity the error axis lies in body x-y, so this also preserves the
+    // regular Sun roll/pitch small-angle gain scaling.
+    feedback = params.KR.asDiagonal() *
+      main_math::canonicalQuaternionImaginaryError(q_error);
+    return feedback +
+           params.KOmega.asDiagonal() * (desired.body_rate - state.body_rate) +
+           desired.angular_acceleration;
+  }
+
   Eigen::Vector3d reduced = Eigen::Vector3d::Zero();
   Eigen::Vector3d yaw = Eigen::Vector3d::Zero();
-  if (denominator > kEpsilon) {
-    reduced << (q_error[0] * q_error[1] - q_error[2] * q_error[3]) / denominator,
-      (q_error[0] * q_error[2] + q_error[1] * q_error[3]) / denominator, 0.0;
-    yaw.z() = q_error[3] / denominator;
-  }
-  Eigen::Vector3d feedback;
+  reduced << (q_error[0] * q_error[1] - q_error[2] * q_error[3]) / denominator,
+    (q_error[0] * q_error[2] + q_error[1] * q_error[3]) / denominator, 0.0;
+  yaw.z() = q_error[3] / denominator;
   feedback <<
     2.0 * params.KR.x() * reduced.x(),
     2.0 * params.KR.y() * reduced.y(),
