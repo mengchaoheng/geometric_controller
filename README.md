@@ -12,6 +12,27 @@ The controller structure and reference trajectories follow the open-source
 [`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)
 project.
 
+## Flight demonstrations
+
+<table>
+  <tr>
+    <th>Horizontal figure-eight</th>
+    <th>Vertical figure-eight</th>
+  </tr>
+  <tr>
+    <td><img src="gif/case_quad_ros2_video_h8.gif" alt="Horizontal figure-eight trajectory" width="100%"></td>
+    <td><img src="gif/case_quad_ros2_video_v8.gif" alt="Vertical figure-eight trajectory" width="100%"></td>
+  </tr>
+  <tr>
+    <th>Sinusoidal flip</th>
+    <th>Fast circular trajectory</th>
+  </tr>
+  <tr>
+    <td><img src="gif/case_quad_ros2_video_flip_sine.gif" alt="Sinusoidal flip trajectory" width="100%"></td>
+    <td><img src="gif/case_quad_ros2_video_fast_circle.gif" alt="Fast circular trajectory" width="100%"></td>
+  </tr>
+</table>
+
 ## Controllers
 
 The package provides:

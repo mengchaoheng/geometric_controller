@@ -9,6 +9,27 @@
 算法结构与参考轨迹实现主要参照开源项目
 [`UAV_Algorithm_Benchmark`](https://github.com/mengchaoheng/UAV_Algorithm_Benchmark)。
 
+## 飞行演示
+
+<table>
+  <tr>
+    <th>水平八字轨迹</th>
+    <th>垂直八字轨迹</th>
+  </tr>
+  <tr>
+    <td><img src="gif/case_quad_ros2_video_h8.gif" alt="水平八字轨迹" width="100%"></td>
+    <td><img src="gif/case_quad_ros2_video_v8.gif" alt="垂直八字轨迹" width="100%"></td>
+  </tr>
+  <tr>
+    <th>正弦翻转轨迹</th>
+    <th>快速圆轨迹</th>
+  </tr>
+  <tr>
+    <td><img src="gif/case_quad_ros2_video_flip_sine.gif" alt="正弦翻转轨迹" width="100%"></td>
+    <td><img src="gif/case_quad_ros2_video_fast_circle.gif" alt="快速圆轨迹" width="100%"></td>
+  </tr>
+</table>
+
 ## 控制器
 
 项目提供以下控制器：
