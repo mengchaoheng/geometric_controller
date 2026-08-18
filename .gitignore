@@ -8,3 +8,4 @@ __pycache__/
 main.m
 AttitudeControl.cpp
 README_main.md
+.ommpc_deps/
