@@ -25,6 +25,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimer>
@@ -32,6 +33,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -187,6 +189,40 @@ private:
       controller_form, "INDI force delay", "indi_force_delay_s", 0.01,
       0.0, 0.1, 0.001, 3, " s");
     controller_layout->addWidget(controller_group);
+
+    auto * ommpc_group = new QGroupBox("Lu OMMPC (controller_type 6)");
+    auto * ommpc_form = new QFormLayout(ommpc_group);
+    ommpc_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    addSolverCombo(ommpc_form);
+    ommpc_horizon_spin_ = addInteger(ommpc_form, "horizon N", "ommpc.N", 8, 1, 100);
+    addDouble(
+      ommpc_form, "OCP grid dt", "ommpc.dt", 0.01, 0.001, 0.2, 0.001, 3, " s");
+    addDouble(
+      ommpc_form, "thrust accel min", "ommpc.thrust_acceleration_min",
+      0.0, 0.0, 100.0, 0.1, 2, " m/s²");
+    addDouble(
+      ommpc_form, "thrust accel max", "ommpc.thrust_acceleration_max",
+      45.3333333333, 0.0, 100.0, 0.1, 2, " m/s²");
+    addVector3(
+      ommpc_form, "body-rate max", "ommpc.body_rate_max", {6.0, 6.0, 6.0},
+      0.0, 30.0, 0.1, 2, " rad/s");
+    addDouble(
+      ommpc_form, "position Q scale", "ommpc.position_weight_scale",
+      1.0, 0.001, 1000.0, 0.1, 3, "");
+    addDouble(
+      ommpc_form, "velocity Q scale", "ommpc.velocity_weight_scale",
+      1.0, 0.001, 1000.0, 0.1, 3, "");
+    addDouble(
+      ommpc_form, "attitude Q scale", "ommpc.attitude_weight_scale",
+      1.0, 0.001, 1000.0, 0.1, 3, "");
+    addDouble(
+      ommpc_form, "input R scale", "ommpc.input_weight_scale",
+      1.0, 0.001, 1000.0, 0.1, 3, "");
+    updateOmmpcSolverCapabilities();
+    ommpc_status_label_ = new QLabel("Waiting for an OMMPC solve");
+    ommpc_status_label_->setWordWrap(true);
+    ommpc_form->addRow("online timing", ommpc_status_label_);
+    controller_layout->addWidget(ommpc_group);
 
     auto * normalization_group = new QGroupBox("PX4 normalization constants");
     auto * normalization_form = new QFormLayout(normalization_group);
@@ -365,6 +401,47 @@ private:
       });
   }
 
+  void addSolverCombo(QFormLayout * form)
+  {
+    const std::string parameter_name = "ommpc.solver";
+    registerParameter(parameter_name);
+    ommpc_solver_combo_ = new QComboBox();
+    ommpc_solver_combo_->addItem("qpoases");
+    ommpc_solver_combo_->addItem("daqp");
+    ommpc_solver_combo_->addItem("hpipm");
+    ommpc_solver_combo_->addItem("piqp");
+    ommpc_solver_combo_->addItem("qpswift");
+    ommpc_solver_combo_->addItem("osqp");
+    ommpc_solver_combo_->addItem("ooqp");
+    ommpc_solver_combo_->addItem("hpipm_ocp");
+    ommpc_solver_combo_->addItem("qpdunes");
+    string_controls_[parameter_name] = ommpc_solver_combo_;
+    form->addRow("solver", ommpc_solver_combo_);
+    QObject::connect(
+      ommpc_solver_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+      [this, parameter_name](int index) {
+        if (index >= 0 && !updating_ui_) {
+          updateOmmpcSolverCapabilities();
+          setParameter(rclcpp::Parameter(
+              parameter_name, ommpc_solver_combo_->itemText(index).toStdString()));
+        }
+      });
+    updateOmmpcSolverCapabilities();
+  }
+
+  void updateOmmpcSolverCapabilities()
+  {
+    if (!ommpc_solver_combo_) {return;}
+    const QString solver = ommpc_solver_combo_->currentText();
+    if (ommpc_horizon_spin_) {
+      const bool structured = solver == "qpdunes" || solver == "hpipm_ocp";
+      ommpc_horizon_spin_->setMaximum(structured ? 100 : 50);
+      ommpc_horizon_spin_->setToolTip(
+        structured ? "Validated online range: N=1..100." :
+        "Validated online range: N=1..50. Use qpDUNES or HPIPM OCP above N=50.");
+    }
+  }
+
   void addShapePages()
   {
     auto * figure8_horizontal = addShapePage();
@@ -426,14 +503,13 @@ private:
 
   QDoubleSpinBox * addDouble(
     QFormLayout * form, const QString & label, const std::string & parameter_name,
-    double default_value, double /* min */, double /* max */, double step, int decimals,
+    double default_value, double min, double max, double step, int decimals,
     const QString & suffix)
   {
     registerParameter(parameter_name);
 
     auto * spin = new QDoubleSpinBox();
-    spin->setRange(
-      std::numeric_limits<double>::lowest(), std::numeric_limits<double>::max());
+    spin->setRange(min, max);
     spin->setSingleStep(step);
     spin->setDecimals(decimals);
     spin->setSuffix(suffix);
@@ -457,6 +533,61 @@ private:
     });
 
     return spin;
+  }
+
+  QSpinBox * addInteger(
+    QFormLayout * form, const QString & label, const std::string & parameter_name,
+    int default_value, int min, int max)
+  {
+    registerParameter(parameter_name);
+    auto * spin = new QSpinBox();
+    spin->setRange(min, max);
+    spin->setKeyboardTracking(false);
+    spin->setValue(default_value);
+    integer_controls_[parameter_name] = spin;
+    form->addRow(label, spin);
+    QObject::connect(spin, &QSpinBox::editingFinished, [this, parameter_name, spin]() {
+        if (!updating_ui_) {
+          setIntegerParameter(parameter_name, spin->value());
+        }
+      });
+    return spin;
+  }
+
+  void addVector3(
+    QFormLayout * form, const QString & label, const std::string & parameter_name,
+    const std::array<double, 3> & defaults, double min, double max, double step,
+    int decimals, const QString & suffix)
+  {
+    registerParameter(parameter_name);
+    auto * row = new QWidget();
+    auto * layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    std::array<QDoubleSpinBox *, 3> controls{};
+    for (std::size_t i = 0; i < controls.size(); ++i) {
+      controls[i] = new QDoubleSpinBox();
+      controls[i]->setRange(min, max);
+      controls[i]->setSingleStep(step);
+      controls[i]->setDecimals(decimals);
+      controls[i]->setSuffix(suffix);
+      controls[i]->setKeyboardTracking(false);
+      controls[i]->setValue(defaults[i]);
+      layout->addWidget(controls[i]);
+    }
+    vector3_controls_[parameter_name] = controls;
+    form->addRow(label, row);
+    for (auto * control : controls) {
+      QObject::connect(control, &QDoubleSpinBox::editingFinished,
+        [this, parameter_name]() {
+          if (updating_ui_) {
+            return;
+          }
+          const auto & values = vector3_controls_.at(parameter_name);
+          setParameter(rclcpp::Parameter(
+              parameter_name,
+              std::vector<double>{values[0]->value(), values[1]->value(), values[2]->value()}));
+        });
+    }
   }
 
   QCheckBox * addBool(
@@ -487,6 +618,14 @@ private:
       [this](const std_msgs::msg::String::SharedPtr msg) {
         if (control_rate_label_) {
           control_rate_label_->setText(QString::fromStdString(msg->data));
+        }
+      });
+    ommpc_status_subscription_ =
+      node_->create_subscription<std_msgs::msg::String>(
+      "/controller/ommpc_status", 10,
+      [this](const std_msgs::msg::String::SharedPtr msg) {
+        if (ommpc_status_label_) {
+          ommpc_status_label_->setText(QString::fromStdString(msg->data));
         }
       });
     ros_timer_ = new QTimer(window_.get());
@@ -582,10 +721,47 @@ private:
       {
         const QSignalBlocker blocker(bool_iter->second);
         bool_iter->second->setChecked(parameter.as_bool());
+        continue;
+      }
+
+      const auto integer_iter = integer_controls_.find(name);
+      if (integer_iter != integer_controls_.end() &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+      {
+        const QSignalBlocker blocker(integer_iter->second);
+        integer_iter->second->setValue(static_cast<int>(parameter.as_int()));
+        continue;
+      }
+
+      const auto string_iter = string_controls_.find(name);
+      if (string_iter != string_controls_.end() &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
+      {
+        const QSignalBlocker blocker(string_iter->second);
+        const int index = string_iter->second->findText(
+          QString::fromStdString(parameter.as_string()));
+        if (index >= 0) {
+          string_iter->second->setCurrentIndex(index);
+        }
+        continue;
+      }
+
+      const auto vector_iter = vector3_controls_.find(name);
+      if (vector_iter != vector3_controls_.end() &&
+        parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY)
+      {
+        const auto values = parameter.as_double_array();
+        if (values.size() == 3U) {
+          for (std::size_t component = 0; component < 3U; ++component) {
+            const QSignalBlocker blocker(vector_iter->second[component]);
+            vector_iter->second[component]->setValue(values[component]);
+          }
+        }
       }
     }
 
     updating_ui_ = false;
+    updateOmmpcSolverCapabilities();
   }
 
   void setTrajectoryTypeUi(int type)
@@ -601,7 +777,7 @@ private:
 
   void setControllerTypeUi(int type)
   {
-    const int clamped = std::clamp(type, 1, 6);
+    const int clamped = std::clamp(type, 1, 7);
     const QSignalBlocker blocker(controller_combo_);
     const int index = controller_combo_->findData(clamped);
     if (index >= 0) {
@@ -688,16 +864,23 @@ private:
   std::unique_ptr<QWidget> window_;
   QLabel * status_label_{nullptr};
   QLabel * control_rate_label_{nullptr};
+  QLabel * ommpc_status_label_{nullptr};
   QComboBox * trajectory_combo_{nullptr};
   QComboBox * controller_combo_{nullptr};
+  QComboBox * ommpc_solver_combo_{nullptr};
+  QSpinBox * ommpc_horizon_spin_{nullptr};
   QStackedWidget * shape_stack_{nullptr};
   QSlider * omega_slider_{nullptr};
   QDoubleSpinBox * omega_spin_{nullptr};
   QTimer * ros_timer_{nullptr};
   QTimer * sync_timer_{nullptr};
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_rate_status_subscription_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ommpc_status_subscription_;
   std::vector<std::string> parameter_names_;
   std::unordered_map<std::string, QDoubleSpinBox *> double_controls_;
+  std::unordered_map<std::string, QSpinBox *> integer_controls_;
+  std::unordered_map<std::string, QComboBox *> string_controls_;
+  std::unordered_map<std::string, std::array<QDoubleSpinBox *, 3>> vector3_controls_;
   std::unordered_map<std::string, QCheckBox *> bool_controls_;
   bool updating_ui_{false};
   bool initial_sync_done_{false};

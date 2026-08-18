@@ -1,0 +1,15 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6618d9a..c6bc5d2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -136,8 +136,8 @@ set(HPIPM_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
+ set(HPIPM_HEADERS_INSTALLATION_DIRECTORY "include" CACHE STRING "Headers local installation directory")
+ 
+ # enable runtine checks
+-set(RUNTIME_CHECKS ON)
+-#set(RUNTIME_CHECKS OFF)
++#set(RUNTIME_CHECKS ON)
++set(RUNTIME_CHECKS OFF)
+ 
+ # C Compiler
+ # set(CMAKE_C_COMPILER gcc CACHE STRING "compiler")

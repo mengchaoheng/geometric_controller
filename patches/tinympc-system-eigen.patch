@@ -1,0 +1,44 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 964635e..b4d4fda 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,4 +4,4 @@ project(tinympc VERSION 0.2.0 LANGUAGES CXX)
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+-include_directories(include/Eigen)
++find_package(Eigen3 REQUIRED)
+diff --git a/src/tinympc/CMakeLists.txt b/src/tinympc/CMakeLists.txt
+index b8654af..f2aff86 100755
+--- a/src/tinympc/CMakeLists.txt
++++ b/src/tinympc/CMakeLists.txt
+@@ -7,6 +7,5 @@ add_library(tinympcstatic STATIC
+ 
+ set_property(TARGET tinympcstatic PROPERTY POSITION_INDEPENDENT_CODE ON)
+ 
+-# target_link_libraries(tinympcstatic PUBLIC Eigen)
++target_link_libraries(tinympcstatic PUBLIC Eigen3::Eigen)
+ target_include_directories(tinympcstatic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+-target_include_directories(tinympcstatic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include/Eigen)
+diff --git a/src/tinympc/admm.cpp b/src/tinympc/admm.cpp
+index d8d4fb1..bf08d4c 100755
+--- a/src/tinympc/admm.cpp
++++ b/src/tinympc/admm.cpp
+@@ -436,7 +436,5 @@ int solve(TinySolver *solver)
+             solver->solution->x = solver->work->vnew;
+             solver->solution->u = solver->work->znew;
+ 
+-            std::cout << "Solver converged in " << solver->work->iter << " iterations" << std::endl;
+-
+             return 0;
+         }
+diff --git a/src/tinympc/types.hpp b/src/tinympc/types.hpp
+index 9bf8eff..c6f253a 100755
+--- a/src/tinympc/types.hpp
++++ b/src/tinympc/types.hpp
+@@ -1,4 +1,4 @@
+ #pragma once
+ 
+ 
+-#include <Eigen.h>
++#include <Eigen/Dense>

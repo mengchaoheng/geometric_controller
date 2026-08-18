@@ -22,6 +22,7 @@
 #include "geometric_controller/controllers/main_johnson_controller.hpp"
 #include "geometric_controller/controllers/main_lee_controller.hpp"
 #include "geometric_controller/controllers/main_sun_dfbc_controller.hpp"
+#include "geometric_controller/controllers/lu_ommpc_controller.hpp"
 
 namespace geometric_controller
 {
@@ -46,6 +47,8 @@ std::string controllerTypeName(ControllerType type)
       return "main_sun_dfbc";
     case ControllerType::MAIN_GEOMETRIC_INDI:
       return "main_geometric_indi";
+    case ControllerType::LU_OMMPC:
+      return "lu_ommpc";
     case ControllerType::PX4_DIRECT:
       return "px4_direct";
   }
@@ -70,6 +73,8 @@ std::shared_ptr<ControllerBase> makeController(ControllerType type)
       return std::make_shared<MainSunDFBCController>();
     case ControllerType::MAIN_GEOMETRIC_INDI:
       return std::make_shared<MainGeometricINDIController>();
+    case ControllerType::LU_OMMPC:
+      return std::make_shared<LuOMMPCController>();
     case ControllerType::PX4_DIRECT:
       return nullptr;
   }
@@ -84,6 +89,7 @@ const std::vector<std::string> & supportedControllerTypes()
     "main_johnson",
     "main_sun_dfbc",
     "main_geometric_indi",
+    "lu_ommpc",
     "px4_direct",
   };
   return names;

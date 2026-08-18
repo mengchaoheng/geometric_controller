@@ -18,6 +18,7 @@
 #include <Eigen/Dense>
 
 #include <cstdint>
+#include <string>
 
 namespace geometric_controller
 {
@@ -29,7 +30,8 @@ enum class ControllerType
   MAIN_JOHNSON = 3,
   MAIN_SUN_DFBC = 4,
   MAIN_GEOMETRIC_INDI = 5,
-  PX4_DIRECT = 6,
+  LU_OMMPC = 6,
+  PX4_DIRECT = 7,
 };
 
 struct VehicleState
@@ -52,7 +54,7 @@ struct VehicleState
   double yaw = 0.0;
 };
 
-struct FlatReference
+struct FlatReferenceKnot
 {
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
@@ -62,6 +64,13 @@ struct FlatReference
   double yaw = 0.0;
   double yaw_rate = 0.0;
   double yaw_accel = 0.0;
+};
+
+struct FlatReference : public FlatReferenceKnot
+{
+  // Optional exact future samples, including k=0. Lu OMMPC consumes these
+  // instead of Taylor-extrapolating one current knot over a long horizon.
+  std::vector<FlatReferenceKnot> horizon;
 };
 
 struct ControllerParams
@@ -83,6 +92,24 @@ struct ControllerParams
   bool indi_rate_enabled = true;
   bool indi_acceleration_enabled = true;
   double mass = 0.75;
+
+  // Lu et al. on-manifold MPC. Q/P/R start from the paper values and these
+  // scales make controlled comparisons possible without hiding the matrices.
+  std::string ommpc_solver = "qpoases";
+  int ommpc_horizon_steps = 8;
+  double ommpc_horizon_dt = 0.01;
+  double ommpc_thrust_acceleration_min = 0.0;
+  double ommpc_thrust_acceleration_max = 45.3333333333;
+  Eigen::Vector3d ommpc_body_rate_max = Eigen::Vector3d::Constant(6.0);
+  double ommpc_position_weight_scale = 1.0;
+  double ommpc_velocity_weight_scale = 1.0;
+  double ommpc_attitude_weight_scale = 1.0;
+  double ommpc_input_weight_scale = 1.0;
+  int ommpc_max_iterations = 4000;
+  double ommpc_tolerance = 1e-9;
+  double ommpc_admm_rho = 1.0;
+  bool ommpc_warm_start = true;
+  std::string ommpc_dataset_path;
 };
 
 struct ControllerCommand
@@ -96,6 +123,20 @@ struct ControllerCommand
   Eigen::Vector3d desired_body_rate = Eigen::Vector3d::Zero();
   Eigen::Vector3d desired_angular_acceleration = Eigen::Vector3d::Zero();
   double collective_thrust = 0.0;
+  // Lu OMMPC optimizes body rate directly. When true, the transport layer
+  // publishes desired_body_rate + collective_thrust as VehicleRatesSetpoint.
+  bool body_rate_control = false;
+  bool valid = true;
+  double solve_time_us = 0.0;
+  double solver_time_us = 0.0;
+  double qp_build_time_us = 0.0;
+  int solver_iterations = 0;
+  int solver_status = 0;
+  bool solver_fallback_used = false;
+  int candidate_solver_status = 0;
+  double candidate_primal_residual = 0.0;
+  double candidate_kkt_scaled = 0.0;
+  bool solution_updated = false;
 };
 
 }  // namespace geometric_controller

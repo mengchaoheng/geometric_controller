@@ -35,6 +35,7 @@
 #include <px4_msgs/msg/vehicle_angular_velocity.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_msgs/msg/vehicle_rates_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
@@ -63,7 +64,24 @@ constexpr double kHeartbeatRateHzMin = 3.0;
 constexpr double kHeartbeatRateHzMax = 10.0;
 constexpr double kStatusTopicWarningDelayS = 5.0;
 constexpr double kStatusTopicWarningPeriodS = 10.0;
+// Lu main.m: par.lu.solvePeriod = par.control.outerPeriod = 0.01 s.
+// This receding-horizon refresh is intentionally independent of the OCP grid
+// interval par.lu.dt (50 ms in the paper-scale setup).
+constexpr double kLuOmmpcControlPeriodS = 0.01;
 constexpr std::size_t kAllocationForceHistorySize = 128;
+
+bool isOnlineOmmmpcSolver(const std::string & name)
+{
+  // These adapters solve the current exact LTV QP and rebuild when online parameters change.
+  // ProxQP currently cannot meet the flight accuracy threshold at practical latency; TinyMPC
+  // is an LTI approximation and CVXPYgen has a fixed generated structure.
+  static const std::array<const char *, 9> supported{
+    "qpoases", "daqp", "hpipm", "piqp", "qpswift", "osqp", "ooqp",
+    "hpipm_ocp", "qpdunes"};
+  return std::any_of(supported.begin(), supported.end(), [&name](const char * candidate) {
+      return name == candidate;
+    });
+}
 
 struct AllocationForceSample
 {
@@ -390,8 +408,9 @@ private:
       "controller_type", 5,
       describeInteger(
         "Controller selector: 1 main_geometric, 2 main_lee, "
-        "3 main_johnson, 4 main_sun_dfbc, 5 main_geometric_indi, 6 px4_direct.",
-        1, 6, 1));
+        "3 main_johnson, 4 main_sun_dfbc, 5 main_geometric_indi, "
+        "6 lu_ommpc, 7 px4_direct.",
+        1, 7, 1));
     declare_parameter<double>(
       "gravity", 9.81, describeDouble("Gravity magnitude used by ROS-side controllers [m/s^2].",
       1.0, 20.0, 0.01));
@@ -439,6 +458,21 @@ private:
       100.0, 0.1));
     declare_parameter<double>("KOmega_y", 8.0, describeDouble("Yaw angular-rate gain.", 0.0,
       100.0, 0.1));
+    declare_parameter<std::string>("ommpc.solver", "qpoases");
+    declare_parameter<int>("ommpc.N", 8);
+    declare_parameter<double>("ommpc.dt", 0.01);
+    declare_parameter<double>("ommpc.thrust_acceleration_min", 0.0);
+    declare_parameter<double>("ommpc.thrust_acceleration_max", 45.3333333333);
+    declare_parameter<std::vector<double>>("ommpc.body_rate_max", {6.0, 6.0, 6.0});
+    declare_parameter<double>("ommpc.position_weight_scale", 1.0);
+    declare_parameter<double>("ommpc.velocity_weight_scale", 1.0);
+    declare_parameter<double>("ommpc.attitude_weight_scale", 1.0);
+    declare_parameter<double>("ommpc.input_weight_scale", 1.0);
+    declare_parameter<int>("ommpc.max_iterations", 4000);
+    declare_parameter<double>("ommpc.tolerance", 1e-9);
+    declare_parameter<double>("ommpc.admm_rho", 1.0);
+    declare_parameter<bool>("ommpc.warm_start", true);
+    declare_parameter<std::string>("ommpc.dataset_path", "");
     declare_parameter<double>(
       "normalizedthrust_constant", 0.022058823529,
       describeDouble(
@@ -463,6 +497,8 @@ private:
       "px4.vehicle_thrust_setpoint_topic", "/fmu/in/vehicle_thrust_setpoint");
     declare_parameter<std::string>(
       "px4.vehicle_torque_setpoint_topic", "/fmu/in/vehicle_torque_setpoint");
+    declare_parameter<std::string>(
+      "px4.vehicle_rates_setpoint_topic", "/fmu/in/vehicle_rates_setpoint");
     declare_parameter<std::string>("px4.vehicle_command_topic", "/fmu/in/vehicle_command");
     declare_parameter<std::string>("px4.vehicle_status_topic",
       px4VersionedTopic<px4_msgs::msg::VehicleStatus>("/fmu/out/vehicle_status"));
@@ -638,6 +674,34 @@ private:
       get_parameter("indi_rate_enabled").as_bool();
     controller_params_.indi_acceleration_enabled =
       get_parameter("indi_acceleration_enabled").as_bool();
+    controller_params_.ommpc_solver = get_parameter("ommpc.solver").as_string();
+    controller_params_.ommpc_horizon_steps =
+      static_cast<int>(get_parameter("ommpc.N").as_int());
+    controller_params_.ommpc_horizon_dt = get_parameter("ommpc.dt").as_double();
+    controller_params_.ommpc_thrust_acceleration_min =
+      get_parameter("ommpc.thrust_acceleration_min").as_double();
+    controller_params_.ommpc_thrust_acceleration_max =
+      get_parameter("ommpc.thrust_acceleration_max").as_double();
+    const auto ommpc_body_rate_max = get_parameter("ommpc.body_rate_max").as_double_array();
+    if (ommpc_body_rate_max.size() != 3U) {
+      throw std::invalid_argument("ommpc.body_rate_max must contain three values");
+    }
+    controller_params_.ommpc_body_rate_max = Eigen::Vector3d(
+      ommpc_body_rate_max[0], ommpc_body_rate_max[1], ommpc_body_rate_max[2]);
+    controller_params_.ommpc_position_weight_scale =
+      get_parameter("ommpc.position_weight_scale").as_double();
+    controller_params_.ommpc_velocity_weight_scale =
+      get_parameter("ommpc.velocity_weight_scale").as_double();
+    controller_params_.ommpc_attitude_weight_scale =
+      get_parameter("ommpc.attitude_weight_scale").as_double();
+    controller_params_.ommpc_input_weight_scale =
+      get_parameter("ommpc.input_weight_scale").as_double();
+    controller_params_.ommpc_max_iterations =
+      static_cast<int>(get_parameter("ommpc.max_iterations").as_int());
+    controller_params_.ommpc_tolerance = get_parameter("ommpc.tolerance").as_double();
+    controller_params_.ommpc_admm_rho = get_parameter("ommpc.admm_rho").as_double();
+    controller_params_.ommpc_warm_start = get_parameter("ommpc.warm_start").as_bool();
+    controller_params_.ommpc_dataset_path = get_parameter("ommpc.dataset_path").as_string();
     indi_acceleration_cutoff_hz_ = get_parameter("indi_acceleration_cutoff_hz").as_double();
     indi_force_delay_s_ = get_parameter("indi_force_delay_s").as_double();
     normalizedthrust_constant_ = get_parameter("normalizedthrust_constant").as_double();
@@ -652,6 +716,8 @@ private:
       get_parameter("px4.vehicle_thrust_setpoint_topic").as_string();
     vehicle_torque_setpoint_topic_ =
       get_parameter("px4.vehicle_torque_setpoint_topic").as_string();
+    vehicle_rates_setpoint_topic_ =
+      get_parameter("px4.vehicle_rates_setpoint_topic").as_string();
     vehicle_command_topic_ = get_parameter("px4.vehicle_command_topic").as_string();
     vehicle_status_topic_ = get_parameter("px4.vehicle_status_topic").as_string();
     vehicle_local_position_topic_ = get_parameter("px4.vehicle_local_position_topic").as_string();
@@ -769,6 +835,9 @@ private:
     vehicle_torque_setpoint_publisher_ =
       create_publisher<px4_msgs::msg::VehicleTorqueSetpoint>(
       vehicle_torque_setpoint_topic_, px4_wrench_pub_qos);
+    vehicle_rates_setpoint_publisher_ =
+      create_publisher<px4_msgs::msg::VehicleRatesSetpoint>(
+      vehicle_rates_setpoint_topic_, px4_wrench_pub_qos);
     vehicle_command_publisher_ =
       create_publisher<px4_msgs::msg::VehicleCommand>(vehicle_command_topic_, px4_pub_qos);
 
@@ -816,6 +885,8 @@ private:
       create_publisher<nav_msgs::msg::Path>(visualization_vehicle_path_topic_, 10);
     control_rate_status_publisher_ =
       create_publisher<std_msgs::msg::String>("controller/control_rate_status", 10);
+    ommpc_status_publisher_ =
+      create_publisher<std_msgs::msg::String>("controller/ommpc_status", 10);
   }
 
   void configureTimers()
@@ -828,6 +899,7 @@ private:
   {
     active_controller_ = geometric_controller::makeController(active_controller_type_);
     last_controller_sample_timestamp_ = 0;
+    next_ommpc_solve_timestamp_ = 0;
     last_consumed_acceleration_sample_timestamp_ = 0;
     resetIndiRuntimeState();
     if (active_controller_ && controllerFeedbackValid()) {
@@ -837,8 +909,10 @@ private:
       RCLCPP_INFO(
         get_logger(), "Controller switched to %s (%s output).",
         geometric_controller::controllerTypeName(active_controller_type_).c_str(),
-        geometric_controller::isRosController(active_controller_type_) ?
-        "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint");
+        active_controller_type_ == geometric_controller::ControllerType::LU_OMMPC ?
+        "VehicleRatesSetpoint" :
+        (geometric_controller::isRosController(active_controller_type_) ?
+        "VehicleThrustSetpoint + VehicleTorqueSetpoint" : "TrajectorySetpoint"));
     }
   }
 
@@ -874,8 +948,35 @@ private:
       return result;
     }
 
+    std::string ommpc_solver = get_parameter("ommpc.solver").as_string();
+    int64_t horizon = get_parameter("ommpc.N").as_int();
+    double horizon_dt = get_parameter("ommpc.dt").as_double();
+    double thrust_min = get_parameter("ommpc.thrust_acceleration_min").as_double();
+    double thrust_max = get_parameter("ommpc.thrust_acceleration_max").as_double();
+    std::vector<double> body_rate_max =
+      get_parameter("ommpc.body_rate_max").as_double_array();
+    double tolerance = get_parameter("ommpc.tolerance").as_double();
+    int64_t max_iterations = get_parameter("ommpc.max_iterations").as_int();
+
     for (const auto & parameter : parameters) {
       const auto & name = parameter.get_name();
+
+      if (name == "ommpc.solver") {ommpc_solver = parameter.as_string();}
+      if (name == "ommpc.N") {horizon = parameter.as_int();}
+      if (name == "ommpc.dt") {horizon_dt = parameter.as_double();}
+      if (name == "ommpc.thrust_acceleration_min") {thrust_min = parameter.as_double();}
+      if (name == "ommpc.thrust_acceleration_max") {thrust_max = parameter.as_double();}
+      if (name == "ommpc.body_rate_max") {body_rate_max = parameter.as_double_array();}
+      if (name == "ommpc.tolerance") {tolerance = parameter.as_double();}
+      if (name == "ommpc.max_iterations") {max_iterations = parameter.as_int();}
+      if (startsWith(name, "ommpc.") &&
+        (name.find("weight_scale") != std::string::npos || name == "ommpc.admm_rho") &&
+        (!std::isfinite(parameter.as_double()) || parameter.as_double() <= 0.0))
+      {
+        result.successful = false;
+        result.reason = name + " must be finite and positive";
+        return result;
+      }
 
       if (parameterAffectsTrajectoryRestart(name)) {
         trajectory_reset_pending_ = true;
@@ -891,6 +992,49 @@ private:
       } else if (name == "trajName") {
         prefer_trajectory_type_ = false;
       }
+    }
+
+    if (!isOnlineOmmmpcSolver(ommpc_solver)) {
+      result.successful = false;
+      result.reason = "solver is benchmark-only or has not passed the online exact-QP gate: " +
+        ommpc_solver;
+      return result;
+    }
+    if (horizon > 50 && ommpc_solver != "qpdunes" && ommpc_solver != "hpipm_ocp") {
+      result.successful = false;
+      result.reason = "online N>50 requires qpdunes or hpipm_ocp; the selected condensed "
+        "solver does not meet the current real-time gate";
+      return result;
+    }
+    if (horizon < 1 || horizon > 100 || !std::isfinite(horizon_dt) ||
+      horizon_dt < 0.001 || horizon_dt > 0.2)
+    {
+      result.successful = false;
+      result.reason = "ommpc.N must be 1..100 and ommpc.dt must be 0.001..0.2 s";
+      return result;
+    }
+    if (!std::isfinite(thrust_min) || !std::isfinite(thrust_max) ||
+      thrust_min < 0.0 || thrust_max <= thrust_min)
+    {
+      result.successful = false;
+      result.reason = "OMMPC thrust bounds must be finite and max must be greater than min";
+      return result;
+    }
+    if (body_rate_max.size() != 3U || std::any_of(
+        body_rate_max.begin(), body_rate_max.end(), [](double value) {
+          return !std::isfinite(value) || value <= 0.0;
+        }))
+    {
+      result.successful = false;
+      result.reason = "ommpc.body_rate_max must contain three finite positive values";
+      return result;
+    }
+    if (!std::isfinite(tolerance) || tolerance < 1e-12 || tolerance > 1e-2 ||
+      max_iterations < 1 || max_iterations > 10000)
+    {
+      result.successful = false;
+      result.reason = "OMMPC tolerance must be 1e-12..1e-2 and iterations 1..10000";
+      return result;
     }
 
     parameters_pending_ = true;
@@ -969,6 +1113,7 @@ private:
     const std::string previous_trajectory_topic = trajectory_setpoint_topic_;
     const std::string previous_thrust_topic = vehicle_thrust_setpoint_topic_;
     const std::string previous_torque_topic = vehicle_torque_setpoint_topic_;
+    const std::string previous_rates_topic = vehicle_rates_setpoint_topic_;
     const std::string previous_command_topic = vehicle_command_topic_;
     const std::string previous_status_topic = vehicle_status_topic_;
     const std::string previous_local_position_topic = vehicle_local_position_topic_;
@@ -1020,6 +1165,7 @@ private:
       previous_trajectory_topic != trajectory_setpoint_topic_ ||
       previous_thrust_topic != vehicle_thrust_setpoint_topic_ ||
       previous_torque_topic != vehicle_torque_setpoint_topic_ ||
+      previous_rates_topic != vehicle_rates_setpoint_topic_ ||
       previous_command_topic != vehicle_command_topic_ ||
       previous_status_topic != vehicle_status_topic_ ||
       previous_local_position_topic != vehicle_local_position_topic_ ||
@@ -1097,6 +1243,9 @@ private:
       // reference has been refreshed from a valid/hold/transition sample.
       if (localPositionValid()) {
         controller_reference_sample_ = setpoint;
+        controller_reference_trajectory_time_s_ = trajectory_started_ ?
+          std::max(0.0, (stamp - start_time_).seconds()) :
+          std::numeric_limits<double>::quiet_NaN();
         controller_reference_received_ = true;
       } else {
         controller_reference_received_ = false;
@@ -1139,9 +1288,11 @@ private:
         RCLCPP_INFO(
           get_logger(),
           "Controller feedback is valid; publishing %s for Offboard.",
-          geometric_controller::isRosController(active_controller_type_) ?
+          active_controller_type_ == geometric_controller::ControllerType::LU_OMMPC ?
+          "VehicleRatesSetpoint on every VehicleLocalPosition sample" :
+          (geometric_controller::isRosController(active_controller_type_) ?
           "VehicleThrustSetpoint + VehicleTorqueSetpoint on every angular-rate sample" :
-          "TrajectorySetpoint at the configured reference rate");
+          "TrajectorySetpoint at the configured reference rate"));
       }
     }
     if (!geometric_controller::isRosController(active_controller_type_)) {
@@ -1187,10 +1338,11 @@ private:
     std::snprintf(
       text, sizeof(text),
       "acc control %.1f Hz (VLP %.1f), rate control/output %.1f Hz "
-      "(gyro %.1f), attitude %.1f Hz, allocation %.1f Hz",
+      "(gyro %.1f), OMMPC solve %.1f Hz, attitude %.1f Hz, allocation %.1f Hz",
       rate(acceleration_control_update_count_), rate(local_position_message_count_),
       rate(controller_update_count_), rate(angular_velocity_message_count_),
-      rate(attitude_message_count_), rate(allocation_message_count_));
+      rate(ommpc_solve_update_count_), rate(attitude_message_count_),
+      rate(allocation_message_count_));
     std_msgs::msg::String message;
     message.data = text;
     control_rate_status_publisher_->publish(message);
@@ -1201,6 +1353,7 @@ private:
     allocation_message_count_ = 0;
     acceleration_control_update_count_ = 0;
     controller_update_count_ = 0;
+    ommpc_solve_update_count_ = 0;
     control_rate_window_start_s_ = stamp_s;
   }
 
@@ -1383,6 +1536,9 @@ private:
       {
         return "waiting for INDI: " + indiFeedbackBlocker();
       }
+      if (active_controller_type_ == geometric_controller::ControllerType::LU_OMMPC) {
+        return "waiting for valid PX4 attitude on '" + vehicle_attitude_topic_ + "'";
+      }
       return "waiting for valid PX4 attitude on '" + vehicle_attitude_topic_ +
              "' and angular velocity on '" + vehicle_angular_velocity_topic_ + "'";
     }
@@ -1557,9 +1713,11 @@ private:
     msg.velocity = !ros_controller && setpoint_level_ == "velocity";
     msg.acceleration = !ros_controller && setpoint_level_ == "acceleration";
     msg.attitude = false;
-    msg.body_rate = false;
+    msg.body_rate = active_controller_type_ ==
+      geometric_controller::ControllerType::LU_OMMPC;
     msg.thrust_and_torque =
-      geometric_controller::isRosController(active_controller_type_);
+      geometric_controller::isRosController(active_controller_type_) &&
+      active_controller_type_ != geometric_controller::ControllerType::LU_OMMPC;
     msg.direct_actuator = false;
     msg.timestamp = timestampMicros(stamp);
     offboard_control_mode_publisher_->publish(msg);
@@ -1570,10 +1728,10 @@ private:
     return Eigen::Vector3d(value[0], value[1], value[2]);
   }
 
-  geometric_controller::FlatReference controllerReference(
-    const geometric_controller::TrajectorySample & sample) const
+  static geometric_controller::FlatReferenceKnot controllerReferenceKnot(
+    const geometric_controller::TrajectorySample & sample)
   {
-    geometric_controller::FlatReference reference;
+    geometric_controller::FlatReferenceKnot reference;
     reference.position = toEigen(sample.position);
     reference.velocity = toEigen(sample.velocity);
     reference.acceleration = toEigen(sample.acceleration);
@@ -1585,10 +1743,32 @@ private:
     return reference;
   }
 
+  geometric_controller::FlatReference controllerReference(
+    const geometric_controller::TrajectorySample & sample) const
+  {
+    geometric_controller::FlatReference reference;
+    static_cast<geometric_controller::FlatReferenceKnot &>(reference) =
+      controllerReferenceKnot(sample);
+    if (active_controller_type_ != geometric_controller::ControllerType::LU_OMMPC ||
+      !std::isfinite(controller_reference_trajectory_time_s_))
+    {
+      return reference;
+    }
+    reference.horizon.reserve(
+      static_cast<std::size_t>(controller_params_.ommpc_horizon_steps + 1));
+    reference.horizon.push_back(controllerReferenceKnot(sample));
+    for (int k = 1; k <= controller_params_.ommpc_horizon_steps; ++k) {
+      const double future_time = controller_reference_trajectory_time_s_ +
+        static_cast<double>(k) * controller_params_.ommpc_horizon_dt;
+      reference.horizon.push_back(
+        controllerReferenceKnot(reference_trajectory_.sample(future_time)));
+    }
+    return reference;
+  }
+
   bool controllerFeedbackValid() const
   {
-    if (!vehicle_attitude_received_ || !vehicle_angular_velocity_received_ ||
-      !localPositionValid())
+    if (!vehicle_attitude_received_ || !localPositionValid())
     {
       return false;
     }
@@ -1598,6 +1778,12 @@ private:
       std::isfinite(q[2]) && std::isfinite(q[3]) &&
       vehicle_attitude_.timestamp_sample > 0;
     if (!attitude_valid) {
+      return false;
+    }
+    if (active_controller_type_ == geometric_controller::ControllerType::LU_OMMPC) {
+      return true;
+    }
+    if (!vehicle_angular_velocity_received_) {
       return false;
     }
     const auto & omega = vehicle_angular_velocity_.xyz;
@@ -1812,6 +1998,77 @@ private:
 
     auto command = active_controller_->update(state, reference, effective_params, dt);
     ++controller_update_count_;
+    if (command.body_rate_control) {
+      const bool solver_deadline_miss = command.solver_time_us >
+        1.0e6 * kLuOmmpcControlPeriodS;
+      const bool callback_deadline_miss = command.solve_time_us >
+        1.0e6 * kLuOmmpcControlPeriodS;
+      if (command.solution_updated && ommpc_status_publisher_) {
+        ++ommpc_solve_update_count_;
+        char status[448];
+        std::snprintf(
+          status, sizeof(status),
+          "{\"solver\":\"%s\",\"total_us\":%.3f,\"solver_us\":%.3f,"
+          "\"qp_build_us\":%.3f,"
+          "\"iterations\":%d,\"status\":%d,\"valid\":%s,"
+          "\"fallback\":false,\"solver_deadline_miss\":%s,"
+          "\"callback_deadline_miss\":%s,"
+          "\"control_period_us\":%.1f,\"ocp_grid_step_us\":%.1f}",
+          controller_params_.ommpc_solver.c_str(), command.solve_time_us,
+          command.solver_time_us, command.qp_build_time_us,
+          command.solver_iterations, command.solver_status,
+          command.valid ? "true" : "false",
+          solver_deadline_miss ? "true" : "false",
+          callback_deadline_miss ? "true" : "false",
+          1.0e6 * kLuOmmpcControlPeriodS,
+          1.0e6 * controller_params_.ommpc_horizon_dt);
+        std_msgs::msg::String status_message;
+        status_message.data = status;
+        ommpc_status_publisher_->publish(status_message);
+      }
+      if (!command.valid) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Lu OMMPC solver '%s' failed (status=%d); no rate setpoint is published and no "
+          "fallback solver is used.", controller_params_.ommpc_solver.c_str(),
+          command.solver_status);
+        return;
+      }
+      if (callback_deadline_miss) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Lu OMMPC callback with solver '%s' missed its %.3f ms deadline "
+          "(solver %.3f ms, total %.3f ms); no stale rate setpoint is published.",
+          controller_params_.ommpc_solver.c_str(),
+          1.0e3 * kLuOmmpcControlPeriodS,
+          1.0e-3 * command.solver_time_us,
+          1.0e-3 * command.solve_time_us);
+        return;
+      }
+      if (!command.desired_body_rate.allFinite() ||
+        !std::isfinite(command.collective_thrust))
+      {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Lu OMMPC solver '%s' produced a non-finite command; no rate setpoint is published.",
+          controller_params_.ommpc_solver.c_str());
+        return;
+      }
+      const double normalized_thrust = std::clamp(
+        normalizedthrust_constant_ * command.collective_thrust / controller_params_.mass,
+        0.0, 1.0);
+      const uint64_t timestamp = timestampMicros(stamp);
+      px4_msgs::msg::VehicleRatesSetpoint rates_message{};
+      rates_message.roll = static_cast<float>(command.desired_body_rate.x());
+      rates_message.pitch = static_cast<float>(command.desired_body_rate.y());
+      rates_message.yaw = static_cast<float>(command.desired_body_rate.z());
+      rates_message.thrust_body = {0.0F, 0.0F, static_cast<float>(-normalized_thrust)};
+      rates_message.timestamp = timestamp;
+      vehicle_rates_setpoint_publisher_->publish(rates_message);
+
+      return;
+    }
+
     if (!command.torque.allFinite() || !std::isfinite(command.collective_thrust)) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 2000,
@@ -2187,6 +2444,45 @@ private:
     updateAlignedAllocationForce(msg->timestamp_sample);
     vehicle_local_position_ = *msg;
     local_position_received_ = true;
+
+    if (active_controller_type_ != geometric_controller::ControllerType::LU_OMMPC ||
+      !offboard_enabled_ || !controller_reference_received_ || !shouldPublishSetpoint())
+    {
+      return;
+    }
+    const uint64_t sample_timestamp =
+      msg->timestamp_sample > 0 ? msg->timestamp_sample : msg->timestamp;
+    if (sample_timestamp == 0 ||
+      (last_controller_sample_timestamp_ > 0 &&
+      sample_timestamp <= last_controller_sample_timestamp_))
+    {
+      return;
+    }
+
+    // Match Lu main.m's 100 Hz receding-horizon refresh while consuming the
+    // newest position sample. ommpc.dt is the independent OCP grid interval.
+    // Keep an absolute phase accumulator so a 125 Hz feedback stream produces
+    // 100 Hz on average instead of falling to 62.5 Hz.
+    const uint64_t period_us = static_cast<uint64_t>(std::llround(
+        1.0e6 * kLuOmmpcControlPeriodS));
+    if (next_ommpc_solve_timestamp_ == 0) {
+      next_ommpc_solve_timestamp_ = sample_timestamp;
+    }
+    if (sample_timestamp < next_ommpc_solve_timestamp_) {
+      return;
+    }
+
+    double controller_dt = kLuOmmpcControlPeriodS;
+    if (last_controller_sample_timestamp_ > 0) {
+      controller_dt = static_cast<double>(
+        sample_timestamp - last_controller_sample_timestamp_) * 1.0e-6;
+    }
+    last_controller_sample_timestamp_ = sample_timestamp;
+    do {
+      next_ommpc_solve_timestamp_ += std::max<uint64_t>(1, period_us);
+    } while (next_ommpc_solve_timestamp_ <= sample_timestamp);
+    publishControllerSetpoint(
+      controller_reference_sample_, now(), sample_timestamp, controller_dt);
   }
 
   void vehicleAttitudeCallback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
@@ -2285,6 +2581,10 @@ private:
     vehicle_angular_velocity_ = *msg;
     vehicle_angular_velocity_received_ = true;
 
+    if (active_controller_type_ == geometric_controller::ControllerType::LU_OMMPC) {
+      return;
+    }
+
     if (!geometric_controller::isRosController(active_controller_type_) ||
       !offboard_enabled_ || !controller_reference_received_ ||
       !shouldPublishSetpoint())
@@ -2344,6 +2644,7 @@ private:
   std::string trajectory_setpoint_topic_;
   std::string vehicle_thrust_setpoint_topic_;
   std::string vehicle_torque_setpoint_topic_;
+  std::string vehicle_rates_setpoint_topic_;
   std::string vehicle_command_topic_;
   std::string vehicle_status_topic_;
   std::string vehicle_local_position_topic_;
@@ -2375,12 +2676,15 @@ private:
     vehicle_thrust_setpoint_publisher_;
   rclcpp::Publisher<px4_msgs::msg::VehicleTorqueSetpoint>::SharedPtr
     vehicle_torque_setpoint_publisher_;
+  rclcpp::Publisher<px4_msgs::msg::VehicleRatesSetpoint>::SharedPtr
+    vehicle_rates_setpoint_publisher_;
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr reference_path_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr reference_pose_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr vehicle_pose_publisher_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr vehicle_path_publisher_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr control_rate_status_publisher_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ommpc_status_publisher_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
     vehicle_local_position_subscriber_;
@@ -2396,6 +2700,8 @@ private:
   px4_msgs::msg::VehicleAngularVelocity vehicle_angular_velocity_{};
   px4_msgs::msg::AllocationValue allocation_value_{};
   geometric_controller::TrajectorySample controller_reference_sample_{};
+  double controller_reference_trajectory_time_s_{
+    std::numeric_limits<double>::quiet_NaN()};
   std::vector<geometry_msgs::msg::PoseStamped> vehicle_path_;
   bool status_received_{false};
   bool local_position_received_{false};
@@ -2426,6 +2732,7 @@ private:
   std::deque<AllocationForceSample> allocation_force_history_;
   uint64_t last_acceleration_sample_timestamp_{0};
   uint64_t last_controller_sample_timestamp_{0};
+  uint64_t next_ommpc_solve_timestamp_{0};
   uint64_t last_consumed_acceleration_sample_timestamp_{0};
   uint64_t local_position_message_count_{0};
   uint64_t attitude_message_count_{0};
@@ -2433,6 +2740,7 @@ private:
   uint64_t allocation_message_count_{0};
   uint64_t acceleration_control_update_count_{0};
   uint64_t controller_update_count_{0};
+  uint64_t ommpc_solve_update_count_{0};
   double control_rate_window_start_s_{std::numeric_limits<double>::quiet_NaN()};
   double last_auto_start_command_time_s_{-std::numeric_limits<double>::infinity()};
   double last_auto_start_wait_log_time_s_{-std::numeric_limits<double>::infinity()};

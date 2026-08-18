@@ -55,6 +55,26 @@ trajectory_offboard_node:
     KOmega_r: 15.0
     KOmega_p: 15.0
     KOmega_y: 10.0
+
+    # Lu et al. 2023 OMMPC (controller_type 6). The default N/Q/R match the
+    # paper's quadrotor experiment; Iris mass/thrust normalization stays below.
+    ommpc:
+      solver: qpoases
+      N: 8
+      dt: 0.01
+      thrust_acceleration_min: 0.0
+      thrust_acceleration_max: 45.3333333333
+      body_rate_max: [6.0, 6.0, 6.0]
+      position_weight_scale: 1.0
+      velocity_weight_scale: 1.0
+      attitude_weight_scale: 1.0
+      input_weight_scale: 1.0
+      # Validated convergence ceiling. Iterative solvers stop early.
+      max_iterations: 4000
+      tolerance: 1.0e-9
+      admm_rho: 1.0
+      warm_start: true
+      dataset_path: ""
     # Same convention as mavros_controllers:
     # normalizedthrust_constant = mass / total_max_thrust.
     normalizedthrust_constant: 0.022058823529
@@ -67,6 +87,7 @@ trajectory_offboard_node:
       trajectory_setpoint_topic: /fmu/in/trajectory_setpoint
       vehicle_thrust_setpoint_topic: /fmu/in/vehicle_thrust_setpoint
       vehicle_torque_setpoint_topic: /fmu/in/vehicle_torque_setpoint
+      vehicle_rates_setpoint_topic: /fmu/in/vehicle_rates_setpoint
       vehicle_command_topic: /fmu/in/vehicle_command
       vehicle_attitude_topic: /fmu/out/vehicle_attitude
       vehicle_angular_velocity_topic: /fmu/out/vehicle_angular_velocity

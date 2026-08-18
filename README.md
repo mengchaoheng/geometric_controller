@@ -164,10 +164,10 @@ a sinusoidal flip, and a circular trajectory. References provide position,
 velocity, acceleration, jerk, snap, and heading derivatives and can be modified
 from the tuning panel or through ROS parameters.
 
-Control execution is driven by PX4 feedback. `VehicleAngularVelocity` triggers
-inner-loop control and command publication; `VehicleLocalPosition` triggers the
-outer-loop acceleration INDI update. The resulting control rates follow the actual state
-feedback rates rather than separate rate parameters. Read measured rates with:
+Control execution consumes PX4 feedback. `VehicleAngularVelocity` triggers the
+other inner-loop controllers and `VehicleLocalPosition` triggers acceleration
+INDI. Lu OMMPC uses the newest position sample at its original fixed 100 Hz
+receding-horizon refresh; the OCP-grid `dt` is independent. Read measured rates with:
 
 ```bash
 ros2 topic echo /controller/control_rate_status --once
@@ -175,6 +175,27 @@ ros2 topic echo /controller/control_rate_status --once
 
 PX4 DDS should publish `vehicle_angular_velocity`, `vehicle_attitude`,
 `vehicle_local_position`, and `allocation_value` at their source rates.
+
+## Lu OMMPC online solver safety
+
+The flight panel exposes the exact, runtime-reconfigurable solver adapters:
+qpOASES, DAQP, HPIPM dense, PIQP, qpSWIFT, OSQP, OOQP, HPIPM OCP, and qpDUNES.
+Changing `N`, OCP-grid `dt`, Q/R scales, or bounds rebuilds the controller, and
+the selected backend is updated with the current problem on every solve. Lu's
+receding-horizon refresh remains 100 Hz (`Tc=0.01 s`) independently of the OCP
+grid interval. Online flight uses no fallback solver: failed, non-finite, or
+late frames are not published and are reported on `/controller/ommpc_status`.
+
+TinyMPC is an approximate LTI problem, CVXPYgen has a fixed generated structure,
+and the present ProxQP path cannot meet the flight accuracy/latency gate. They
+remain available in `lu_ommpc_benchmark` but are intentionally absent from the
+flight panel. Advanced solver knobs are kept out of the flight panel during the
+current feasibility phase.
+
+Zero 2 W standalone packaging and no-simulation test instructions are in
+[docs/ommpc_pi_zero2w.md](docs/ommpc_pi_zero2w.md).
+Local build, correctness, isolated timing, and ROS safety-status procedures are in
+[docs/ommpc_local_benchmark.md](docs/ommpc_local_benchmark.md).
 
 ## Installation
 
