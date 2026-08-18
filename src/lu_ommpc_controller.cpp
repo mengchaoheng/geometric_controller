@@ -61,9 +61,9 @@ lu_ommpc::MpcConfig LuOMMPCController::makeConfig(const ControllerParams & param
   config.admm_rho = params.ommpc_admm_rho;
   config.warm_start = params.ommpc_warm_start;
   // Flight comparisons must exercise the selected backend itself. A hidden
-  // qpOASES substitution would make tracking results meaningless. Failed or
-  // non-finite solves are rejected by the command-valid path and reported by
-  // the node; numerical quality comparisons remain an offline diagnostic.
+  // solver substitution would make tracking results meaningless. Failed or
+  // non-finite solves are rejected by the command-valid path
+  // and reported by the node.
   config.verify_solution = false;
   config.dataset_path = params.ommpc_dataset_path;
   return config;

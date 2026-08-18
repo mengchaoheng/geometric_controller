@@ -275,16 +275,15 @@ OMMPC 使用最新的 PX4 `VehicleLocalPosition` 和 `VehicleAttitude`，不要�
 时域为 `N*dt`，不改变控制频率。例如 `N=8, dt=0.05` 预测 0.4 s，但仍以
 100 Hz 重规划。measured control rates 同时显示 VLP、OMMPC 和姿态实测频率。
 
-飞行面板只列出能够在参数改变后重建当前精确 LTV QP/OCP 的路径：qpOASES、DAQP、
-HPIPM dense、PIQP、qpSWIFT、OSQP、OOQP、HPIPM OCP 和 qpDUNES。在线修改
-`N、OCP grid dt、Q/R scale、输入界` 都会重建控制器；每个控制周期再用当前问题
-更新所选求解器。在线飞行不使用任何备用求解器：失败、非有限结果或整个回调超过
-10 ms 时不发布该帧的新指令，并在 `/controller/ommpc_status` 报告。状态中的
-`fallback` 恒为 `false`，因此飞行效果确实来自面板中选择的求解器。
+飞行面板当前列出五个基准：`qpDUNES`、`HPIPM OCP`、`qpOASES`、`OSQP` 和 `DAQP`，默认
+仍为 qpDUNES。在线修改 `N、OCP grid dt、Q/R scale、输入界` 会重建当前阶段
+OCP 或 condensed QP，并在下一次反馈时更新所选实例。在线飞行不使用任何备用
+求解器：失败、非有限结果或整个回调超过 10 ms 时不发布该帧的新指令，并在
+`/controller/ommpc_status` 报告；`fallback` 恒为 `false`。
 
-TinyMPC 是不同的近似 LTI 问题，CVXPYgen 是固定生成结构；ProxQP 当前延迟较大。
-这三类仍可离线 benchmark，但不会伪装成可在线任意改参的飞行求解器。求解器的
-迭代上限、容差、rho 和 warm-start 属于离线/高级求解器实验，本轮不在飞行面板暴露。
+默认使用 `N=20, dt=0.05 s`。已验证的实用范围是 `N=20..25、dt=0.025..0.05`；
+`N=20,dt=.03` 是计算余量优先候选，`N=25,dt=.025` 是精度/余量折中，
+`N=30,dt=.025` 仅作边界对照。`N>=45`、`dt<=.01` 和 `dt=.005` 不作为飞行候选。
 
 OMMPC 保留两种等价表示：
 
@@ -297,26 +296,13 @@ OMMPC 保留两种等价表示：
 
 | 路径 | 建模 | 本轮使用的专用功能 |
 | --- | --- | --- |
-| qpOASES | 精确 condensed QP | 原生变量上下界、热启动 |
-| OSQP | 精确 condensed QP | 固定稀疏结构、只更新矩阵数值和向量 |
-| ProxQP | 精确 condensed QP | benchmark-only；高精度配置延迟过大 |
-| DAQP | 精确 condensed QP | 原生 box QP、热启动 |
-| PIQP | 精确 condensed QP | 原生变量上下界、持久 solver/update |
-| HPIPM dense | 精确 condensed QP | BLASFEO dense QP、原生变量上下界 |
-| qpSWIFT / OOQP | 精确 condensed QP | 库接口的一次性 dense 求解路径，作为对照 |
-| `hpipm_ocp` | 精确阶段 OCP | HPIPM OCP IPM、逐阶段 A/B/Q/R 与输入界 |
-| `qpdunes` | 精确阶段 OCP | qpDUNES stage intervals、输入简单界 |
-| `cvxpygen_osqp` | 固定生成的阶段 OCP | 仅固定 `N=8`、论文权重，benchmark-only |
-| `tinympc_lti` | **近似** LTI OCP | 每帧用第一个阶段 A/B 重新建立 Riccati cache |
-| `tinympc_lti_cached` | **近似**固定 LTI OCP | 首帧建立 cache，之后只更新 x0 和输入界 |
+| `qpdunes` | 精确阶段 OCP | stage intervals、阶段 A/B/Q/R、输入上下界、热启动 |
+| `hpipm_ocp` | 精确阶段 OCP | 阶段 A/B/Q/R、输入界、IPM warm start |
+| `qpoases` | 精确 condensed QP | 原生变量上下界、active-set warm start |
+| `osqp` | 精确 condensed QP | box constraints、ADMM 基准路径 |
+| `daqp` | 精确 condensed QP | active-set/惩罚基准路径、热启动 |
 
-TinyMPC 当前 C++ 主线接口使用一组固定 A/B，而 Lu OMMPC 是随参考轨迹变化的 LTV
-问题。因此两个 TinyMPC 数字只衡量可部署的 LTI 近似路径，不能和其余“同一个精确
-QP”的解质量直接排名。这里选择可复现、可离线生成的 CVXPYgen；没有依赖 CVXGEN
-在线代码生成服务。
-
-若系统未安装对应开发包，可在源码目录执行无 sudo 的本地安装脚本。脚本固定版本
-获取并构建全部后端，生成 CVXPYgen C 代码，然后重新构建工作区：
+若系统未安装本地五个基准库，可在源码目录执行安装脚本，然后重新构建工作区：
 
 ```bash
 ./scripts/install_ommpc_solvers.sh
@@ -330,18 +316,16 @@ source install/setup.bash
 
 ```bash
 ros2 run geometric_controller lu_ommpc_benchmark \
-  --mode solver --solver all --preset paper --samples 5000 --warmup 500
+  --mode solver --solver qpdunes --preset paper --samples 5000 --warmup 500
 
 ros2 run geometric_controller lu_ommpc_benchmark \
-  --mode mpc --solver all --preset paper --samples 5000 --warmup 500 \
+  --mode mpc --solver qpdunes --preset paper --samples 5000 --warmup 500 \
   --csv /tmp/lu_ommpc_mpc.csv
 ```
 
-输出包含 mean、p50、p90、p95、p99、p99.9、最大耗时、超一个模型步长的次数、
-失败数、原始残差与 KKT 残差。`--solver all` 会在完全相同的状态/参考样本上依次
-测试全部路径。新增求解器只需实现
-[solver.hpp](include/lu_ommpc/solver.hpp) 的 `QPSolver` 接口并注册，无需修改
-OMMPC 建模或 ROS/PX4 节点。
+输出包含 mean、p50、p90、p95、p99、p99.9、最大耗时、10 ms deadline miss、
+失败数和残差。当前构建接受 `--solver qpdunes|hpipm_ocp|qpoases|osqp|daqp`，也接受
+`--solver all` 依次测试五条保留路径；在线控制不会在路径之间自动 fallback。
 
 ### 飞行数据记录与回放
 
@@ -358,7 +342,7 @@ ros2 param set /trajectory_offboard_node controller_type 6
 
 ```bash
 ros2 run geometric_controller lu_ommpc_benchmark \
-  --mode replay --solver all --preset paper \
+  --mode replay --solver qpdunes --preset paper \
   --samples 5000 --warmup 500 \
   --dataset-in /tmp/lu_ommpc_iris_figure8.bin \
   --csv /tmp/lu_ommpc_iris_replay.csv
@@ -369,27 +353,19 @@ ros2 run geometric_controller lu_ommpc_benchmark \
 
 ### 当前本机结果
 
-QPBuilder 已改成逐阶段累加，只计算 Mu 当前非零的前缀块，不再生成 Hx、完整 Mu、
-Qbar 和 Rbar；矩阵工作区与参考时域也会在 N 不变时复用。qpOASES 固定使用
-`HST_POSDEF`，HPIPM 构建关闭运行时检查，qpDUNES 持久化工作区并只更新阶段数据。
+qpDUNES 在线路径直接使用阶段 OCP；每帧更新 A/B/Q/R 和输入界，改变 N 时重建
+workspace，普通帧保留热启动。condensed QP 仍保留在核心中用于建模单元测试，
+但不再被在线求解器使用。
 
 2026-08-17 在 Mac 上的 Parallels ARM64 虚拟机（10 vCPU、分配16 GiB内存、
 Ubuntu 24.04.4）Release 构建中，使用“一求解器一进程、客体CPU 3、三轮重复”的
 完整 raw MPC 基准。下表取三轮 mean 的中位数；在线飞行和离线测试均不使用
 fallback，因此只用于树莓派前筛选：
 
-| N / dt | qpOASES | qpDUNES OCP | HPIPM OCP | 结论 |
-| --- | ---: | ---: | ---: | --- |
-| 8 / 0.05 | 27.1 us | 45.1 us | 96.1 us | qpOASES 最快 |
-| 20 / 0.05 | 174.3 us | 103.9 us | 238.5 us | qpDUNES 最快 |
-| 50 / 0.02 | 2.088 ms | 0.279 ms | 0.665 ms | qpDUNES 最快 |
-| 100 / 0.01 | 17.774 ms | 0.805 ms | 1.660 ms | qpOASES 超过 10 ms |
-
-三条路径在每一档内部都以同状态、同参考、同 `N/dt/Q/R/约束` 对高精度 qpOASES
-参考逐帧验证，全部 `PASS` 且求解失败为 0。不同档位定义不同 MPC 问题，绝不比较
-它们的控制输出。完整单元/回归测试为 125 项、0 失败。另已修复 qpOASES 自带
-BLAS replacement 与 OOQP/LAPACK 的全局 `dgemm_` 符号冲突；这是多求解器同进程
-共存时会真实导致崩溃的问题。
+当前发布版只报告 qpDUNES 的原始 OCP 性能；不同 `N/dt` 是不同 MPC 问题，控制
+输出不能跨配置直接比较。正式 Pi 结果应同时记录 mean、P99、P99.9、max、
+`deadline_miss` 和 `failures`。默认 `N=20,dt=.05` 已在 180 s 压力测试中零超时；
+`N=20,dt=.03` 和 `N=25,dt=.025` 是两个已确认的 Pareto 候选。
 
 ### 一秒预测时域
 
@@ -408,16 +384,15 @@ ros2 run geometric_controller lu_ommpc_benchmark \
   --samples 3000 --warmup 300
 
 ros2 run geometric_controller lu_ommpc_benchmark \
-  --mode mpc --solver hpipm_ocp --preset one_second_100hz \
+  --mode mpc --solver qpdunes --preset one_second_100hz \
   --samples 500 --warmup 50
 ```
 
 这张表不能代替 Raspberry Pi Zero 2 W 原机测试。移到树莓派后应使用相同的
 Release 构建、参数、样本数，并固定 CPU 核心后至少重复 5 轮；同时记录温度、
-CPU 频率和降频状态。当前本机候选为 qpOASES、qpDUNES 和 HPIPM OCP；最终排序
-必须以 Zero 2 W 原机的零求解失败和计时结果为前提。完整无仿真步骤与 ARM64 打包说明见
-[docs/ommpc_pi_zero2w.md](docs/ommpc_pi_zero2w.md)。TinyMPC cached 仍只作为资源
-受限近似实验，不能仅凭耗时替换精确 OMMPC。
+CPU 频率和降频状态。当前唯一候选为 qpDUNES；最终长测仍以 Zero 2 W 原机的零
+求解失败和计时结果为准。完整无仿真步骤与 ARM64 打包说明见
+[docs/ommpc_pi_runtime_test.md](docs/ommpc_pi_runtime_test.md)。
 
 本机的完整编译、125 项回归测试、四档独立进程计时、虚拟机环境、
 内存占用、结果分析和原始结果目录见

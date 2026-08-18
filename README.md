@@ -178,22 +178,23 @@ PX4 DDS should publish `vehicle_angular_velocity`, `vehicle_attitude`,
 
 ## Lu OMMPC online solver safety
 
-The flight panel exposes the exact, runtime-reconfigurable solver adapters:
-qpOASES, DAQP, HPIPM dense, PIQP, qpSWIFT, OSQP, OOQP, HPIPM OCP, and qpDUNES.
-Changing `N`, OCP-grid `dt`, Q/R scales, or bounds rebuilds the controller, and
-the selected backend is updated with the current problem on every solve. Lu's
-receding-horizon refresh remains 100 Hz (`Tc=0.01 s`) independently of the OCP
-grid interval. Online flight uses no fallback solver: failed, non-finite, or
-late frames are not published and are reported on `/controller/ommpc_status`.
+Lu OMMPC is embedded in this package under `include/lu_ommpc` and
+`src/lu_ommpc_*`; the active ROS node, reference generator, panel, and PX4
+message bridge all remain in `geometric_controller`. The old standalone
+`src/lu_ommpc` package is not part of the workspace build.
 
-TinyMPC is an approximate LTI problem, CVXPYgen has a fixed generated structure,
-and the present ProxQP path cannot meet the flight accuracy/latency gate. They
-remain available in `lu_ommpc_benchmark` but are intentionally absent from the
-flight panel. Advanced solver knobs are kept out of the flight panel during the
-current feasibility phase.
+The flight panel exposes five exact, runtime-reconfigurable backends: qpDUNES,
+HPIPM OCP, qpOASES, OSQP, and DAQP. qpDUNES remains the default.
+Changing `N`, OCP-grid `dt`, Q/R scales, or bounds rebuilds the stage OCP, and
+qpDUNES is updated with the current matrices on every solve. Lu's
+receding-horizon refresh remains 100 Hz (`Tc=0.01 s`) independently of the OCP
+grid interval. The default is `N=20, dt=0.05 s`; validated practical candidates
+are `N=20..25, dt=0.025..0.05`. Online flight uses no fallback solver: failed,
+non-finite, or late frames are not published and are reported on
+`/controller/ommpc_status`.
 
 Zero 2 W standalone packaging and no-simulation test instructions are in
-[docs/ommpc_pi_zero2w.md](docs/ommpc_pi_zero2w.md).
+[docs/ommpc_pi_runtime_test.md](docs/ommpc_pi_runtime_test.md).
 Local build, correctness, isolated timing, and ROS safety-status procedures are in
 [docs/ommpc_local_benchmark.md](docs/ommpc_local_benchmark.md).
 

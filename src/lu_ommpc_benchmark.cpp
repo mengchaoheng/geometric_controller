@@ -2,6 +2,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "lu_ommpc/core.hpp"
@@ -20,7 +22,7 @@ namespace
 
 struct Options
 {
-  std::string solver{"all"};
+  std::string solver{"qpdunes"};
   std::string preset{"paper"};
   std::string mode{"solver"};
   std::string dataset_in;
@@ -30,6 +32,8 @@ struct Options
   int warmup{200};
   int horizon_steps{-1};
   double horizon_dt{-1.0};
+  double rate_hz{100.0};
+  double duration_s{60.0};
   bool cold_start{false};
 };
 
@@ -45,19 +49,6 @@ struct Measurements
   double max_kkt{0.0};
   bool has_primal{false};
   bool has_kkt{false};
-};
-
-struct ValidationMeasurements
-{
-  int count{0};
-  int failures{0};
-  double max_objective_relative{0.0};
-  double max_first_control_inf{0.0};
-  double max_solution_inf{0.0};
-  double max_primal{0.0};
-  double max_kkt{0.0};
-  double max_kkt_scaled{0.0};
-  bool passed{true};
 };
 
 Options parseOptions(int argc, char ** argv)
@@ -85,6 +76,10 @@ Options parseOptions(int argc, char ** argv)
       options.horizon_steps = std::stoi(value(argument));
     } else if (argument == "--dt") {
       options.horizon_dt = std::stod(value(argument));
+    } else if (argument == "--rate-hz") {
+      options.rate_hz = std::stod(value(argument));
+    } else if (argument == "--duration") {
+      options.duration_s = std::stod(value(argument));
     } else if (argument == "--dataset-in") {
       options.dataset_in = value(argument);
     } else if (argument == "--dataset-out") {
@@ -95,26 +90,30 @@ Options parseOptions(int argc, char ** argv)
       options.cold_start = true;
     } else if (argument == "--help" || argument == "-h") {
       std::cout <<
-        "lu_ommpc_benchmark [--mode solver|mpc|replay|validate] "
-        "[--solver all|osqp|qpoases|proxqp|"
-        "daqp|piqp|qpswift|hpipm|ooqp|hpipm_ocp|qpdunes|tinympc_lti|"
-        "tinympc_lti_cached|cvxpygen_osqp]\n"
+        "lu_ommpc_benchmark [--mode solver|mpc|stress|replay] "
+        "[--solver qpdunes|hpipm_ocp|qpoases|osqp|daqp|all]\n"
         "  [--preset paper|one_second|one_second_100hz|main_comparison] "
         "[--samples N] [--warmup N]\n"
         "  [--horizon N] [--dt SECONDS]\n"
+        "  [--rate-hz HZ] [--duration SECONDS] (stress mode)\n"
         "  [--cold-start] [--dataset-in FILE] [--dataset-out FILE] [--csv FILE]\n";
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + argument);
     }
   }
-  if (options.samples < 1 || options.warmup < 0 || options.warmup >= options.samples) {
+  if (options.mode != "stress" &&
+    (options.samples < 1 || options.warmup < 0 || options.warmup >= options.samples))
+  {
     throw std::invalid_argument("require samples > warmup >= 0");
   }
   if ((options.horizon_steps != -1 && options.horizon_steps <= 0) ||
     (options.horizon_dt != -1.0 && options.horizon_dt <= 0.0))
   {
     throw std::invalid_argument("horizon and dt overrides must be positive");
+  }
+  if (!(options.rate_hz > 0.0) || !(options.duration_s > 0.0)) {
+    throw std::invalid_argument("rate-hz and duration must be positive");
   }
   return options;
 }
@@ -144,13 +143,16 @@ lu_ommpc::MpcConfig makeConfig(const Options & options)
   return config;
 }
 
-lu_ommpc::ReferenceHorizon makeReferenceHorizon(
-  double time_s, const lu_ommpc::MpcConfig & config)
+void fillReferenceHorizon(
+  double time_s, const lu_ommpc::MpcConfig & config,
+  lu_ommpc::ReferenceHorizon & horizon)
 {
   constexpr double radius = 1.3;
   constexpr double omega = 1.2;
-  lu_ommpc::ReferenceHorizon horizon;
-  horizon.reserve(static_cast<std::size_t>(config.horizon_steps + 1));
+  const auto horizon_size = static_cast<std::size_t>(config.horizon_steps + 1);
+  if (horizon.size() != horizon_size) {
+    horizon.resize(horizon_size);
+  }
   for (int k = 0; k <= config.horizon_steps; ++k) {
     const double t = time_s + static_cast<double>(k) * config.horizon_dt;
     const double phase = omega * t;
@@ -170,9 +172,9 @@ lu_ommpc::ReferenceHorizon makeReferenceHorizon(
       radius * std::pow(omega, 4) * std::sin(phase), 0.0);
     flat.yaw = phase + 0.5 * std::acos(-1.0);
     flat.yaw_rate = omega;
-    horizon.push_back(lu_ommpc::flatnessReference(flat, config.gravity));
+    horizon[static_cast<std::size_t>(k)] =
+      lu_ommpc::flatnessReference(flat, config.gravity);
   }
-  return horizon;
 }
 
 lu_ommpc::State perturbedState(
@@ -226,9 +228,10 @@ std::vector<lu_ommpc::QPSnapshot> makeDataset(
   }
 
   lu_ommpc::QPBuilder builder(config);
+  lu_ommpc::ReferenceHorizon horizon;
   for (int i = 0; i < options.samples; ++i) {
     const double time_s = 0.01 * i;
-    const auto horizon = makeReferenceHorizon(time_s, config);
+    fillReferenceHorizon(time_s, config, horizon);
     lu_ommpc::QPSnapshot snapshot;
     snapshot.timestamp_us = static_cast<uint64_t>(i) * 10000U;
     snapshot.state = perturbedState(horizon.front(), time_s);
@@ -270,6 +273,20 @@ double mean(const std::vector<double> & values)
          std::accumulate(values.begin(), values.end(), 0.0) / values.size();
 }
 
+double standardDeviation(const std::vector<double> & values)
+{
+  if (values.empty()) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  const double average = mean(values);
+  double squared_error = 0.0;
+  for (const double value : values) {
+    const double error = value - average;
+    squared_error += error * error;
+  }
+  return std::sqrt(squared_error / static_cast<double>(values.size()));
+}
+
 void updateResiduals(Measurements & measurement, const lu_ommpc::SolverResult & result)
 {
   if (std::isfinite(result.primal_residual)) {
@@ -289,6 +306,7 @@ void printStats(const std::string & solver, const Measurements & measurement)
             << solver
             << " count=" << values.size()
             << " mean_us=" << mean(values)
+            << " stddev_us=" << standardDeviation(values)
             << " p50_us=" << percentile(values, 0.50)
             << " p90_us=" << percentile(values, 0.90)
             << " p95_us=" << percentile(values, 0.95)
@@ -309,18 +327,13 @@ void printStats(const std::string & solver, const Measurements & measurement)
 
 std::vector<std::string> selectedSolvers(const std::string & option)
 {
+  const auto supported = lu_ommpc::availableSolvers();
   if (option == "all") {
-    return lu_ommpc::availableSolvers();
+    return supported;
   }
-  return {option};
-}
-
-std::vector<std::string> selectedValidationSolvers(const std::string & option)
-{
-  if (option == "all") {
-    // Exact, persistent implementations with credible embedded potential. Approximate LTI
-    // substitutions and one-shot reference adapters are intentionally excluded here.
-    return {"qpoases", "hpipm_ocp", "qpdunes", "hpipm", "proxqp", "daqp"};
+  if (std::find(supported.begin(), supported.end(), option) == supported.end()) {
+    throw std::invalid_argument(
+      "unsupported solver; use qpdunes, hpipm_ocp, qpoases, osqp, daqp, or all");
   }
   return {option};
 }
@@ -334,118 +347,6 @@ Eigen::VectorXd shiftSolution(const Eigen::VectorXd & x)
   shifted.head(x.size() - lu_ommpc::kInputDim) = x.tail(x.size() - lu_ommpc::kInputDim);
   shifted.tail(lu_ommpc::kInputDim) = x.tail(lu_ommpc::kInputDim);
   return shifted;
-}
-
-std::vector<lu_ommpc::SolverResult> solveSequence(
-  const std::string & solver_name, const Options & options,
-  const lu_ommpc::MpcConfig & config,
-  const std::vector<lu_ommpc::QPSnapshot> & snapshots)
-{
-  auto solver = lu_ommpc::makeSolver(solver_name, config);
-  std::vector<lu_ommpc::SolverResult> results;
-  results.reserve(snapshots.size());
-  Eigen::VectorXd previous;
-  for (const auto & snapshot : snapshots) {
-    lu_ommpc::SolverResult result;
-    if (solver->update(snapshot.problem)) {
-      if (options.cold_start) {
-        solver->clearWarmStart();
-      } else {
-        const Eigen::VectorXd warm = shiftSolution(previous);
-        if (warm.size() == snapshot.problem.g.size()) {
-          solver->warmStart(warm);
-        } else {
-          solver->clearWarmStart();
-        }
-      }
-      result = solver->solve();
-      if (result.status == lu_ommpc::SolverStatus::kSolved) {
-        previous = result.x;
-      }
-    }
-    results.push_back(std::move(result));
-  }
-  return results;
-}
-
-ValidationMeasurements validateSolver(
-  const std::string & solver_name, const Options & options,
-  const lu_ommpc::MpcConfig & config,
-  const std::vector<lu_ommpc::QPSnapshot> & snapshots,
-  const std::vector<lu_ommpc::SolverResult> & references)
-{
-  constexpr double kObjectiveRelativeLimit = 1e-7;
-  constexpr double kFirstControlLimit = 1e-4;
-  constexpr double kSolutionLimit = 1e-3;
-  constexpr double kPrimalLimit = 1e-7;
-  constexpr double kScaledKktLimit = 1e-4;
-
-  const auto candidates = solver_name == "qpoases" ? references :
-    solveSequence(solver_name, options, config, snapshots);
-  ValidationMeasurements measurement;
-  for (std::size_t i = static_cast<std::size_t>(options.warmup); i < snapshots.size(); ++i) {
-    const auto & reference = references[i];
-    const auto & candidate = candidates[i];
-    ++measurement.count;
-    if (reference.status != lu_ommpc::SolverStatus::kSolved ||
-      candidate.status != lu_ommpc::SolverStatus::kSolved ||
-      reference.x.size() != candidate.x.size() || reference.x.size() < lu_ommpc::kInputDim)
-    {
-      ++measurement.failures;
-      continue;
-    }
-    const auto & problem = snapshots[i].problem;
-    const double reference_objective = lu_ommpc::qpObjective(problem, reference.x);
-    const double candidate_objective = lu_ommpc::qpObjective(problem, candidate.x);
-    const double objective_relative = std::abs(candidate_objective - reference_objective) /
-      std::max(1.0, std::abs(reference_objective));
-    const double first_control =
-      (candidate.x.head(lu_ommpc::kInputDim) -
-      reference.x.head(lu_ommpc::kInputDim)).lpNorm<Eigen::Infinity>();
-    const double solution = (candidate.x - reference.x).lpNorm<Eigen::Infinity>();
-    const double primal = lu_ommpc::qpPrimalResidual(problem, candidate.x);
-    const double kkt = lu_ommpc::qpBoxKktResidual(problem, candidate.x);
-    const Eigen::VectorXd gradient = problem.H * candidate.x + problem.g;
-    const double gradient_scale = std::max(
-      1.0, std::max(gradient.lpNorm<Eigen::Infinity>(),
-      problem.g.lpNorm<Eigen::Infinity>()));
-    const double kkt_scaled = kkt / gradient_scale;
-    if (!std::isfinite(objective_relative) || !std::isfinite(first_control) ||
-      !std::isfinite(solution) || !std::isfinite(primal) || !std::isfinite(kkt) ||
-      !std::isfinite(kkt_scaled))
-    {
-      ++measurement.failures;
-      continue;
-    }
-    measurement.max_objective_relative =
-      std::max(measurement.max_objective_relative, objective_relative);
-    measurement.max_first_control_inf =
-      std::max(measurement.max_first_control_inf, first_control);
-    measurement.max_solution_inf = std::max(measurement.max_solution_inf, solution);
-    measurement.max_primal = std::max(measurement.max_primal, primal);
-    measurement.max_kkt = std::max(measurement.max_kkt, kkt);
-    measurement.max_kkt_scaled = std::max(measurement.max_kkt_scaled, kkt_scaled);
-  }
-  measurement.passed = measurement.failures == 0 &&
-    measurement.max_objective_relative <= kObjectiveRelativeLimit &&
-    measurement.max_first_control_inf <= kFirstControlLimit &&
-    measurement.max_solution_inf <= kSolutionLimit &&
-    measurement.max_primal <= kPrimalLimit &&
-    measurement.max_kkt_scaled <= kScaledKktLimit;
-  return measurement;
-}
-
-void printValidation(const std::string & solver, const ValidationMeasurements & measurement)
-{
-  std::cout << solver << " validation=" << (measurement.passed ? "PASS" : "FAIL")
-            << " count=" << measurement.count << " failures=" << measurement.failures
-            << std::scientific << std::setprecision(6)
-            << " max_objective_relative=" << measurement.max_objective_relative
-            << " max_first_control_inf=" << measurement.max_first_control_inf
-            << " max_solution_inf=" << measurement.max_solution_inf
-            << " max_primal=" << measurement.max_primal
-            << " max_kkt=" << measurement.max_kkt
-            << " max_kkt_scaled=" << measurement.max_kkt_scaled << std::fixed << '\n';
 }
 
 Measurements runSolverBenchmark(
@@ -504,12 +405,13 @@ Measurements runMpcBenchmark(
 {
   lu_ommpc::OMMPCController controller(config, solver_name);
   Measurements measurements;
+  lu_ommpc::ReferenceHorizon horizon;
   for (int i = 0; i < options.samples; ++i) {
     if (options.cold_start) {
       controller.reset();
     }
     const double time_s = 0.01 * i;
-    const auto horizon = makeReferenceHorizon(time_s, config);
+    fillReferenceHorizon(time_s, config, horizon);
     const auto result = controller.solve(perturbedState(horizon.front(), time_s), horizon);
     if (!result.command_valid) {
       ++measurements.failures;
@@ -531,6 +433,76 @@ Measurements runMpcBenchmark(
       }
     }
   }
+  return measurements;
+}
+
+Measurements runRateStress(
+  const std::string & solver_name, const Options & options,
+  const lu_ommpc::MpcConfig & config, std::ofstream * csv)
+{
+  // Keep one controller/solver instance alive and pace calls at the requested
+  // rate. This models continuous OMMPC work without starting a new process for
+  // every 10 ms sample. It deliberately does not publish PX4 messages.
+  lu_ommpc::OMMPCController controller(config, solver_name);
+  Measurements measurements;
+  const auto period = std::chrono::duration<double>(1.0 / options.rate_hz);
+  const auto period_us = 1.0e6 / options.rate_hz;
+  // `duration` is a wall-clock limit for a system-stress run.  The previous
+  // implementation used a fixed number of cycles only.  That made a run
+  // longer than requested whenever a cycle missed its release (the loop kept
+  // executing all nominal cycles back-to-back).  Keep the nominal cycle count
+  // for the requested rate, but stop at the wall-clock deadline as well.
+  const int target_cycles = std::max(
+    1, static_cast<int>(std::ceil(options.duration_s * options.rate_hz)));
+  const auto stress_start = std::chrono::steady_clock::now();
+  const auto stress_deadline = stress_start +
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(options.duration_s));
+  auto next_release = stress_start;
+  lu_ommpc::ReferenceHorizon horizon;
+
+  std::cout << "stress_target_cycles=" << target_cycles << " rate_hz=" << options.rate_hz
+            << " duration_s=" << options.duration_s << '\n';
+  int completed_cycles = 0;
+  for (int i = 0; i < target_cycles; ++i) {
+    std::this_thread::sleep_until(next_release);
+    if (std::chrono::steady_clock::now() >= stress_deadline) {
+      break;
+    }
+    const double time_s = static_cast<double>(i) / options.rate_hz;
+    const auto cycle_start = std::chrono::steady_clock::now();
+    fillReferenceHorizon(time_s, config, horizon);
+    const auto result = controller.solve(perturbedState(horizon.front(), time_s), horizon);
+    const auto cycle_end = std::chrono::steady_clock::now();
+    const double wall_us = std::chrono::duration<double, std::micro>(
+      cycle_end - cycle_start).count();
+
+    if (!result.command_valid) {
+      ++measurements.failures;
+    }
+    if (i >= options.warmup) {
+      measurements.update_us.push_back(result.solver.update_us);
+      measurements.solve_us.push_back(result.solver.solve_us);
+      measurements.build_us.push_back(
+        result.manifold_us + result.linearization_us + result.qp_build_us);
+      measurements.total_us.push_back(wall_us);
+      measurements.deadline_misses += wall_us > period_us ? 1 : 0;
+      updateResiduals(measurements, result.solver);
+      if (csv != nullptr) {
+        *csv << solver_name << ',' << i << ',' << result.solver.update_us << ','
+             << result.solver.solve_us << ',' << wall_us << ','
+             << result.manifold_us + result.linearization_us + result.qp_build_us << ','
+             << result.solver.iterations << ',' << static_cast<int>(result.solver.status) << ','
+             << result.solver.objective << ',' << result.solver.primal_residual << ','
+             << result.solver.kkt_residual << '\n';
+      }
+    }
+    next_release = stress_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      period * static_cast<double>(i + 1));
+    completed_cycles = i + 1;
+  }
+  std::cout << "stress_completed_cycles=" << completed_cycles
+            << " target_cycles=" << target_cycles << '\n';
   return measurements;
 }
 
@@ -589,39 +561,26 @@ int main(int argc, char ** argv)
     }
 
     std::vector<lu_ommpc::QPSnapshot> dataset;
-    if (options.mode == "solver" || options.mode == "replay" || options.mode == "validate") {
+    if (options.mode == "solver" || options.mode == "replay") {
       if (options.mode == "replay" && options.dataset_in.empty()) {
         throw std::invalid_argument("replay mode requires --dataset-in");
       }
       dataset = makeDataset(options, config);
-    } else if (options.mode != "mpc") {
-      throw std::invalid_argument("mode must be solver, mpc, replay, or validate");
+    } else if (options.mode != "mpc" && options.mode != "stress") {
+      throw std::invalid_argument("mode must be solver, mpc, stress, or replay");
     }
 
     std::cout << "mode=" << options.mode << " preset=" << options.preset
               << " N=" << config.horizon_steps << " dt=" << config.horizon_dt
               << " start=" << (options.cold_start ? "cold" : "warm") << '\n';
-    if (options.mode == "validate") {
-      // The reference is deliberately tighter than production. Candidates retain the same
-      // settings used by timed MPC runs, so a fast path cannot hide behind extra validation work.
-      auto reference_config = config;
-      reference_config.solver_tolerance = std::min(reference_config.solver_tolerance, 1e-9);
-      reference_config.solver_max_iterations = std::max(reference_config.solver_max_iterations, 2000);
-      const auto references = solveSequence("qpoases", options, reference_config, dataset);
-      bool all_passed = true;
-      for (const auto & solver : selectedValidationSolvers(options.solver)) {
-        const auto measurement = validateSolver(solver, options, config, dataset, references);
-        printValidation(solver, measurement);
-        all_passed = all_passed && measurement.passed;
-      }
-      return all_passed ? 0 : 2;
-    }
     for (const auto & solver : selectedSolvers(options.solver)) {
       const Measurements measurements = options.mode == "solver" ?
         runSolverBenchmark(solver, options, config, dataset, csv ? &csv : nullptr) :
         (options.mode == "replay" ?
         runReplayBenchmark(solver, options, config, dataset, csv ? &csv : nullptr) :
-        runMpcBenchmark(solver, options, config, csv ? &csv : nullptr));
+        (options.mode == "stress" ?
+        runRateStress(solver, options, config, csv ? &csv : nullptr) :
+        runMpcBenchmark(solver, options, config, csv ? &csv : nullptr)));
       printStats(solver, measurements);
     }
   } catch (const std::exception & error) {

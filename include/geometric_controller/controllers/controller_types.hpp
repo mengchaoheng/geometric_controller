@@ -95,9 +95,9 @@ struct ControllerParams
 
   // Lu et al. on-manifold MPC. Q/P/R start from the paper values and these
   // scales make controlled comparisons possible without hiding the matrices.
-  std::string ommpc_solver = "qpoases";
-  int ommpc_horizon_steps = 8;
-  double ommpc_horizon_dt = 0.01;
+  std::string ommpc_solver = "qpdunes";
+  int ommpc_horizon_steps = 20;
+  double ommpc_horizon_dt = 0.05;
   double ommpc_thrust_acceleration_min = 0.0;
   double ommpc_thrust_acceleration_max = 45.3333333333;
   Eigen::Vector3d ommpc_body_rate_max = Eigen::Vector3d::Constant(6.0);

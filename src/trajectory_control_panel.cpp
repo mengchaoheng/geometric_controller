@@ -194,9 +194,9 @@ private:
     auto * ommpc_form = new QFormLayout(ommpc_group);
     ommpc_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     addSolverCombo(ommpc_form);
-    ommpc_horizon_spin_ = addInteger(ommpc_form, "horizon N", "ommpc.N", 8, 1, 100);
+    ommpc_horizon_spin_ = addInteger(ommpc_form, "horizon N", "ommpc.N", 20, 1, 100);
     addDouble(
-      ommpc_form, "OCP grid dt", "ommpc.dt", 0.01, 0.001, 0.2, 0.001, 3, " s");
+      ommpc_form, "OCP grid dt", "ommpc.dt", 0.05, 0.001, 0.2, 0.001, 3, " s");
     addDouble(
       ommpc_form, "thrust accel min", "ommpc.thrust_acceleration_min",
       0.0, 0.0, 100.0, 0.1, 2, " m/s²");
@@ -406,15 +406,11 @@ private:
     const std::string parameter_name = "ommpc.solver";
     registerParameter(parameter_name);
     ommpc_solver_combo_ = new QComboBox();
-    ommpc_solver_combo_->addItem("qpoases");
-    ommpc_solver_combo_->addItem("daqp");
-    ommpc_solver_combo_->addItem("hpipm");
-    ommpc_solver_combo_->addItem("piqp");
-    ommpc_solver_combo_->addItem("qpswift");
-    ommpc_solver_combo_->addItem("osqp");
-    ommpc_solver_combo_->addItem("ooqp");
-    ommpc_solver_combo_->addItem("hpipm_ocp");
     ommpc_solver_combo_->addItem("qpdunes");
+    ommpc_solver_combo_->addItem("hpipm_ocp");
+    ommpc_solver_combo_->addItem("qpoases");
+    ommpc_solver_combo_->addItem("osqp");
+    ommpc_solver_combo_->addItem("daqp");
     string_controls_[parameter_name] = ommpc_solver_combo_;
     form->addRow("solver", ommpc_solver_combo_);
     QObject::connect(
@@ -432,13 +428,11 @@ private:
   void updateOmmpcSolverCapabilities()
   {
     if (!ommpc_solver_combo_) {return;}
-    const QString solver = ommpc_solver_combo_->currentText();
     if (ommpc_horizon_spin_) {
-      const bool structured = solver == "qpdunes" || solver == "hpipm_ocp";
-      ommpc_horizon_spin_->setMaximum(structured ? 100 : 50);
+      ommpc_horizon_spin_->setMaximum(100);
       ommpc_horizon_spin_->setToolTip(
-        structured ? "Validated online range: N=1..100." :
-        "Validated online range: N=1..50. Use qpDUNES or HPIPM OCP above N=50.");
+        "Online baselines: qpdunes, hpipm_ocp, qpoases, osqp, daqp. Validated flight "
+        "candidates: qpDUNES N=20..25, dt=0.025..0.05.");
     }
   }
 

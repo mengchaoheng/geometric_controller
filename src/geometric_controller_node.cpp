@@ -72,15 +72,8 @@ constexpr std::size_t kAllocationForceHistorySize = 128;
 
 bool isOnlineOmmmpcSolver(const std::string & name)
 {
-  // These adapters solve the current exact LTV QP and rebuild when online parameters change.
-  // ProxQP currently cannot meet the flight accuracy threshold at practical latency; TinyMPC
-  // is an LTI approximation and CVXPYgen has a fixed generated structure.
-  static const std::array<const char *, 9> supported{
-    "qpoases", "daqp", "hpipm", "piqp", "qpswift", "osqp", "ooqp",
-    "hpipm_ocp", "qpdunes"};
-  return std::any_of(supported.begin(), supported.end(), [&name](const char * candidate) {
-      return name == candidate;
-    });
+  return name == "qpdunes" || name == "hpipm_ocp" ||
+         name == "qpoases" || name == "osqp" || name == "daqp";
 }
 
 struct AllocationForceSample
@@ -458,9 +451,9 @@ private:
       100.0, 0.1));
     declare_parameter<double>("KOmega_y", 8.0, describeDouble("Yaw angular-rate gain.", 0.0,
       100.0, 0.1));
-    declare_parameter<std::string>("ommpc.solver", "qpoases");
-    declare_parameter<int>("ommpc.N", 8);
-    declare_parameter<double>("ommpc.dt", 0.01);
+    declare_parameter<std::string>("ommpc.solver", "qpdunes");
+    declare_parameter<int>("ommpc.N", 20);
+    declare_parameter<double>("ommpc.dt", 0.05);
     declare_parameter<double>("ommpc.thrust_acceleration_min", 0.0);
     declare_parameter<double>("ommpc.thrust_acceleration_max", 45.3333333333);
     declare_parameter<std::vector<double>>("ommpc.body_rate_max", {6.0, 6.0, 6.0});
@@ -998,12 +991,6 @@ private:
       result.successful = false;
       result.reason = "solver is benchmark-only or has not passed the online exact-QP gate: " +
         ommpc_solver;
-      return result;
-    }
-    if (horizon > 50 && ommpc_solver != "qpdunes" && ommpc_solver != "hpipm_ocp") {
-      result.successful = false;
-      result.reason = "online N>50 requires qpdunes or hpipm_ocp; the selected condensed "
-        "solver does not meet the current real-time gate";
       return result;
     }
     if (horizon < 1 || horizon > 100 || !std::isfinite(horizon_dt) ||

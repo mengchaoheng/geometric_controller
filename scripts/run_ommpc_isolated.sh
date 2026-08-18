@@ -10,7 +10,7 @@ samples="${OMMPC_SAMPLES:-2000}"
 warmup="${OMMPC_WARMUP:-200}"
 repeats="${OMMPC_REPEATS:-3}"
 cpu="${OMMPC_CPU:-3}"
-solvers="${OMMPC_SOLVERS:-qpoases hpipm_ocp qpdunes}"
+solvers="${OMMPC_SOLVERS:-qpdunes}"
 output_dir="${OMMPC_OUTPUT_DIR:-/tmp/lu_ommpc_isolated}"
 benchmark_bin="${OMMPC_BENCHMARK_BIN:-}"
 
@@ -40,4 +40,3 @@ for ((round = 1; round <= repeats; ++round)); do
       "$@" 2>&1 | tee "${stem}.log"
   done
 done
-

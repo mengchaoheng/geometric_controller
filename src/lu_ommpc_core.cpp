@@ -276,7 +276,16 @@ void QPBuilder::buildInto(
       problem.H.block<kInputDim, kInputDim>(
         k * kInputDim, k * kInputDim) += config_.R;
     }
-    problem.H = 0.5 * (problem.H + problem.H.transpose());
+    // Symmetrize in place.  The previous Eigen expression created a dynamic
+    // temporary matrix on every MPC cycle; the problem is unchanged, but the
+    // temporary could add allocator/cache jitter on small ARM systems.
+    for (int row = 0; row < input_stack_size; ++row) {
+      for (int col = row + 1; col < input_stack_size; ++col) {
+        const double symmetric = 0.5 * (problem.H(row, col) + problem.H(col, row));
+        problem.H(row, col) = symmetric;
+        problem.H(col, row) = symmetric;
+      }
+    }
     problem.H.diagonal().array() += 1e-9;
   } else {
     problem.H.resize(0, 0);
@@ -328,6 +337,9 @@ void QPBuilder::buildInto(
 OMMPCController::OMMPCController(MpcConfig config, const std::string & solver_name)
 : config_(std::move(config)), builder_(config_), solver_(makeSolver(solver_name, config_))
 {
+  if (!solver_) {
+    throw std::invalid_argument("unsupported OMMPC solver: " + solver_name);
+  }
   if (!config_.dataset_path.empty()) {
     dataset_writer_ = std::make_unique<QPDatasetWriter>(config_.dataset_path);
     if (!dataset_writer_->good()) {

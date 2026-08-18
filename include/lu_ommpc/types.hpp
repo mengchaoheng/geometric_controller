@@ -120,8 +120,8 @@ struct SolverResult
 
 struct MpcConfig
 {
-  int horizon_steps{8};
-  double horizon_dt{0.01};
+  int horizon_steps{20};
+  double horizon_dt{0.05};
   Eigen::Matrix<double, kStateDim, kStateDim> Q{
     (Eigen::Matrix<double, kStateDim, 1>() <<
       15000.0, 15000.0, 15000.0, 40.0, 40.0, 40.0, 80.0, 80.0, 80.0).finished().asDiagonal()};
@@ -132,9 +132,8 @@ struct MpcConfig
   double thrust_acceleration_min{0.0};
   double thrust_acceleration_max{30.0};
   Eigen::Vector3d body_rate_max{Eigen::Vector3d::Constant(6.0)};
-  // A high ceiling is intentional: iterative backends stop early when they
-  // converge, while OSQP needs more than 120 iterations for some valid online
-  // weight/bound changes at the flight accuracy threshold.
+  // qpDUNES stops early when it converges; keep a generous ceiling so valid
+  // online weight/bound changes are not rejected by an artificial limit.
   int solver_max_iterations{4000};
   double solver_tolerance{1e-9};
   double admm_rho{1.0};

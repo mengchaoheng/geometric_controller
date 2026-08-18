@@ -1,4 +1,4 @@
-// Extensible QP solver interface used by geometric_controller's Lu OMMPC.
+// Small extensible QP solver interface used by geometric_controller's Lu OMMPC.
 #ifndef LU_OMMPC__SOLVER_HPP_
 #define LU_OMMPC__SOLVER_HPP_
 
@@ -26,15 +26,11 @@ public:
 std::unique_ptr<QPSolver> makeSolver(const std::string & name, const MpcConfig & config);
 std::vector<std::string> availableSolvers();
 
-// Implemented by the mature third-party solver adapter translation unit.
 std::unique_ptr<QPSolver> makeExternalSolver(
   const std::string & name, const MpcConfig & config);
 std::vector<std::string> availableExternalSolvers();
 
 std::unique_ptr<QPSolver> makeStructuredSolver(
-  const std::string & name, const MpcConfig & config);
-std::vector<std::string> availableStructuredSolvers();
-std::unique_ptr<QPSolver> makeCvxpygenSolver(
   const std::string & name, const MpcConfig & config);
 
 double qpObjective(const QPProblem & problem, const Eigen::VectorXd & x);

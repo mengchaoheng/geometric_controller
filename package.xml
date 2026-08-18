@@ -19,8 +19,6 @@
   <depend>rcl_interfaces</depend>
   <depend>eigen3_cmake_module</depend>
   <depend>eigen</depend>
-  <depend>osqp_vendor</depend>
-  <depend>proxsuite</depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
   <exec_depend>rviz2</exec_depend>
